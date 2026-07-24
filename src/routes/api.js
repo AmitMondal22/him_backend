@@ -1,0 +1,96 @@
+import { signup, signin, getCurrentUser, changePassword } from "../controllers/authController.js";
+import { 
+  getDashboardSummary, getDevices, getDeviceById, createDevice, updateDevice, deleteDevice,
+  getDeviceStatuses, getDeviceStatus, getTelemetry, getAlarms, updateAlarm,
+  getSites, createSite, updateSite, deleteSite,
+  getAssets, createAsset, updateAsset, deleteAsset,
+  getCustomers, getUserRoles, seedDemo,
+  getProfiles, getProfileById, updateProfile, deleteProfile,
+  getUserRolesAll, createUserRole, deleteUserRole,
+  getNotificationRules, createNotificationRule, updateNotificationRule, deleteNotificationRule
+} from "../controllers/dataController.js";
+import { requireAuth } from "../middlewares/authMiddleware.js";
+import { 
+  signupSchema, signinSchema, deviceSchema, siteSchema, assetSchema 
+} from "../validation/schemas.js";
+
+// Validation helper hook
+const validate = (schema) => async (request, reply) => {
+  const { error } = schema.validate(request.body);
+  if (error) {
+    reply.status(400).send({ error: error.details[0].message });
+    return;
+  }
+};
+
+export default async function apiRoutes(fastify, options) {
+  // Public Routes
+  fastify.post("/auth/register", { preHandler: validate(signupSchema) }, signup);
+  fastify.post("/auth/login", { preHandler: validate(signinSchema) }, signin);
+
+  // Protected Routes Group
+  fastify.register(async function (protectedFastify) {
+    // Register requireAuth hook for this subgroup of routes
+    protectedFastify.addHook("preHandler", requireAuth);
+
+    protectedFastify.get("/auth/me", getCurrentUser);
+    protectedFastify.post("/seed", seedDemo);
+    protectedFastify.get("/dashboard/summary", getDashboardSummary);
+
+    // Devices
+    protectedFastify.get("/devices", getDevices);
+    protectedFastify.get("/devices/:id", getDeviceById);
+    protectedFastify.post("/devices", { preHandler: validate(deviceSchema) }, createDevice);
+    protectedFastify.put("/devices/:id", { preHandler: validate(deviceSchema.fork(["device_id", "name", "customer_id"], (s) => s.optional())) }, updateDevice);
+    protectedFastify.delete("/devices/:id", deleteDevice);
+
+    // Statuses
+    protectedFastify.get("/device-statuses", getDeviceStatuses);
+    protectedFastify.get("/devices/:id/status", getDeviceStatus);
+
+    // Telemetry
+    protectedFastify.get("/telemetry", getTelemetry);
+
+    // Alarms
+    protectedFastify.get("/alarms", getAlarms);
+    protectedFastify.put("/alarms/:id", updateAlarm);
+
+    // Sites
+    protectedFastify.get("/sites", getSites);
+    protectedFastify.post("/sites", { preHandler: validate(siteSchema) }, createSite);
+    protectedFastify.put("/sites/:id", { preHandler: validate(siteSchema.fork(["name", "customer_id"], (s) => s.optional())) }, updateSite);
+    protectedFastify.delete("/sites/:id", deleteSite);
+
+    // Assets
+    protectedFastify.get("/assets", getAssets);
+    protectedFastify.post("/assets", { preHandler: validate(assetSchema) }, createAsset);
+    protectedFastify.put("/assets/:id", { preHandler: validate(assetSchema.fork(["name", "customer_id"], (s) => s.optional())) }, updateAsset);
+    protectedFastify.delete("/assets/:id", deleteAsset);
+
+    // Customers
+    protectedFastify.get("/customers", getCustomers);
+
+    // User roles
+    protectedFastify.get("/roles", getUserRoles);
+
+    // Profiles CRUD
+    protectedFastify.get("/profiles", getProfiles);
+    protectedFastify.get("/profiles/:id", getProfileById);
+    protectedFastify.put("/profiles/:id", updateProfile);
+    protectedFastify.delete("/profiles/:id", deleteProfile);
+
+    // User Roles CRUD
+    protectedFastify.get("/user_roles", getUserRolesAll);
+    protectedFastify.post("/user_roles", createUserRole);
+    protectedFastify.delete("/user_roles/:id", deleteUserRole);
+
+    // Security
+    protectedFastify.post("/auth/change-password", changePassword);
+
+    // Notification Rules
+    protectedFastify.get("/notification_rules", getNotificationRules);
+    protectedFastify.post("/notification_rules", createNotificationRule);
+    protectedFastify.put("/notification_rules/:id", updateNotificationRule);
+    protectedFastify.delete("/notification_rules/:id", deleteNotificationRule);
+  });
+}
