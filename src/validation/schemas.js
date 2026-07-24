@@ -31,16 +31,18 @@ export const deviceSchema = Joi.object({
 
 export const siteSchema = Joi.object({
   name: Joi.string().required(),
-  address: Joi.string().allow("").optional(),
-  latitude: Joi.number().optional(),
-  longitude: Joi.number().optional(),
+  address: Joi.string().allow("", null).optional(),
+  latitude: Joi.number().allow(null).optional(),
+  longitude: Joi.number().allow(null).optional(),
+  active: Joi.boolean().optional(),
   customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
 });
 
 export const assetSchema = Joi.object({
   name: Joi.string().required(),
-  vehicle_number: Joi.string().allow("").optional(),
+  vehicle_number: Joi.string().allow("", null).optional(),
   kind: Joi.string().default("vehicle"),
+  active: Joi.boolean().optional(),
   customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
   site_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
 });
