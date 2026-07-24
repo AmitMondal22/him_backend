@@ -326,7 +326,7 @@ export const getTelemetry = async (request, reply) => {
 
     const rows = [];
     try {
-      await new Promise((resolve, reject) => {
+      await new Promise((resolve) => {
         queryApi.queryRows(query, {
           next(row, tableMeta) {
             const o = tableMeta.toObject(row);
@@ -342,7 +342,8 @@ export const getTelemetry = async (request, reply) => {
             });
           },
           error(err) {
-            resolve(); // do not reject, fallback below
+            console.warn("InfluxDB query error:", err.message);
+            resolve();
           },
           complete() {
             resolve();
@@ -350,40 +351,7 @@ export const getTelemetry = async (request, reply) => {
         });
       });
     } catch (e) {
-      console.warn("Influx query warning:", e);
-    }
-
-    // Fallback: If InfluxDB returns 0 points, generate realistic route history points
-    if (rows.length === 0 && device) {
-      const status = await DeviceStatus.findOne({ where: { device_id: device.id } });
-      const baseLat = status?.latitude != null ? Number(status.latitude) : 28.5355;
-      const baseLng = status?.longitude != null ? Number(status.longitude) : 77.2910;
-      const baseTemp = status?.temperature_c != null ? Number(status.temperature_c) : 4.8;
-
-      const count = 35;
-      const startTime = start.getTime();
-      const endTime = end.getTime();
-      const step = Math.max(60000, (endTime - startTime) / count);
-
-      for (let i = 0; i < count; i++) {
-        const ptTime = new Date(startTime + i * step);
-        const t = i / count;
-        // Generate continuous route trajectory curve
-        const latOffset = Math.sin(t * Math.PI * 3) * 0.018 + (t * 0.025);
-        const lngOffset = Math.cos(t * Math.PI * 2) * 0.022 + (t * 0.03);
-        const tempWave = baseTemp + Math.sin(i / 3) * 4.2;
-
-        rows.push({
-          ts: ptTime.toISOString(),
-          device_id: device.id,
-          temperature_c: Number(tempWave.toFixed(2)),
-          latitude: Number((baseLat + latOffset).toFixed(6)),
-          longitude: Number((baseLng + lngOffset).toFixed(6)),
-          speed_knots: Number((12 + Math.sin(i) * 8).toFixed(1)),
-          course_deg: Number(((i * 28) % 360).toFixed(0)),
-          valid: true,
-        });
-      }
+      console.warn("Influx query warning:", e.message);
     }
 
     reply.status(200).send(rows);
@@ -439,7 +407,11 @@ export const createSite = async (request, reply) => {
     const site = await Site.create(request.body);
     reply.status(201).send(site);
   } catch (error) {
-    reply.status(500).send({ error: "Failed to create site" });
+    console.error("Create site error:", error);
+    const msg = error.name === "SequelizeUniqueConstraintError"
+      ? `A site named '${request.body.name}' already exists for this customer`
+      : error.message || "Failed to create site";
+    reply.status(400).send({ error: msg });
   }
 };
 
@@ -453,7 +425,8 @@ export const updateSite = async (request, reply) => {
     await site.update(request.body);
     reply.status(200).send(site);
   } catch (error) {
-    reply.status(500).send({ error: "Failed to update site" });
+    console.error("Update site error:", error);
+    reply.status(400).send({ error: error.message || "Failed to update site" });
   }
 };
 
@@ -464,10 +437,13 @@ export const deleteSite = async (request, reply) => {
       reply.status(404).send({ error: "Site not found" });
       return;
     }
+    // Nullify site reference on devices before deleting to avoid FK constraint errors
+    await Device.update({ site_id: null }, { where: { site_id: site.id } });
     await site.destroy();
     reply.status(200).send({ message: "Site deleted successfully" });
   } catch (error) {
-    reply.status(500).send({ error: "Failed to delete site" });
+    console.error("Delete site error:", error);
+    reply.status(400).send({ error: error.message || "Failed to delete site" });
   }
 };
 
@@ -486,7 +462,11 @@ export const createAsset = async (request, reply) => {
     const asset = await Asset.create(request.body);
     reply.status(201).send(asset);
   } catch (error) {
-    reply.status(500).send({ error: "Failed to create asset" });
+    console.error("Create asset error:", error);
+    const msg = error.name === "SequelizeUniqueConstraintError"
+      ? `An asset named '${request.body.name}' already exists for this customer`
+      : error.message || "Failed to create asset";
+    reply.status(400).send({ error: msg });
   }
 };
 
@@ -500,7 +480,8 @@ export const updateAsset = async (request, reply) => {
     await asset.update(request.body);
     reply.status(200).send(asset);
   } catch (error) {
-    reply.status(500).send({ error: "Failed to update asset" });
+    console.error("Update asset error:", error);
+    reply.status(400).send({ error: error.message || "Failed to update asset" });
   }
 };
 
@@ -511,10 +492,13 @@ export const deleteAsset = async (request, reply) => {
       reply.status(404).send({ error: "Asset not found" });
       return;
     }
+    // Nullify asset reference on devices before deleting to avoid FK constraint errors
+    await Device.update({ asset_id: null }, { where: { asset_id: asset.id } });
     await asset.destroy();
     reply.status(200).send({ message: "Asset deleted successfully" });
   } catch (error) {
-    reply.status(500).send({ error: "Failed to delete asset" });
+    console.error("Delete asset error:", error);
+    reply.status(400).send({ error: error.message || "Failed to delete asset" });
   }
 };
 
@@ -664,7 +648,7 @@ export const deleteUserRole = async (request, reply) => {
   }
 };
 
-// DB Seeder RPC handler
+// DB Seeder RPC handler — creates structural reference data only (no fake telemetry)
 export const seedDemo = async (request, reply) => {
   try {
     const userId = request.user.id;
@@ -711,30 +695,16 @@ export const seedDemo = async (request, reply) => {
       { customer_id: customers[2].id, site_id: sites[2].id, asset_id: assets[2].id, device_id: "SLM0000005", imei: "863110081000005", name: "Logger SLM0000005", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 34 * 86400000) }
     ], { returning: true });
 
+    // Create initial device status rows (will be updated by real MQTT data)
     await DeviceStatus.bulkCreate([
-      { device_id: devices[0].id, temperature_c: 5.4, latitude: 28.5355, longitude: 77.2910, speed_knots: 15.4, gps_valid: true, satellites: 10, firmware_version: "2.0.4", config_version: "1.0.0", connection_state: "online", last_seen_at: new Date(), last_startup_at: new Date(Date.now() - 3600_000) },
-      { device_id: devices[1].id, temperature_c: 12.4, latitude: 19.0760, longitude: 72.9987, speed_knots: 25.4, gps_valid: true, satellites: 11, firmware_version: "2.0.5", config_version: "1.0.0", connection_state: "online", last_seen_at: new Date(), last_startup_at: new Date(Date.now() - 3600_000) },
-      { device_id: devices[2].id, temperature_c: -3.5, latitude: 12.8452, longitude: 77.6602, speed_knots: 0.0, gps_valid: true, satellites: 9, firmware_version: "2.0.5", config_version: "1.0.0", connection_state: "online", last_seen_at: new Date(), last_startup_at: new Date(Date.now() - 3600_000) },
-      { device_id: devices[3].id, temperature_c: 5.0, latitude: 28.5355, longitude: 77.3910, speed_knots: 0.0, gps_valid: true, satellites: 10, firmware_version: "2.0.5", config_version: "1.0.0", connection_state: "online", last_seen_at: new Date(), last_startup_at: new Date(Date.now() - 3600_000) },
-      { device_id: devices[4].id, temperature_c: 4.2, latitude: 13.0250, longitude: 77.5900, speed_knots: 0.0, gps_valid: true, satellites: 9, firmware_version: "2.0.5", config_version: "1.0.0", connection_state: "online", last_seen_at: new Date(), last_startup_at: new Date(Date.now() - 3600_000) }
+      { device_id: devices[0].id, customer_id: customers[0].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
+      { device_id: devices[1].id, customer_id: customers[1].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
+      { device_id: devices[2].id, customer_id: customers[2].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
+      { device_id: devices[3].id, customer_id: customers[0].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
+      { device_id: devices[4].id, customer_id: customers[2].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
     ]);
 
-    const telemetryData = [];
-    for (let k = 60; k >= 0; k--) {
-      const ts = new Date(Date.now() - k * 60_000);
-      const wave = Math.sin(k / 6) * 1.5;
-      telemetryData.push({ device_id: devices[0].id, customer_id: customers[0].id, ts, temperature_c: 5.4 + wave, raw_temperature_c: 5.2 + wave, cold_junction_c: 30.1, alarm_state: 0, fault_code: 0, csq: 15, signal_dbm: -75, latitude: 28.5355, longitude: 77.2910, speed_knots: 15.4, valid: true, sample_count: 12000 + k });
-      telemetryData.push({ device_id: devices[1].id, customer_id: customers[1].id, ts, temperature_c: 12.4 + wave, raw_temperature_c: 12.2 + wave, cold_junction_c: 30.5, alarm_state: 2, fault_code: 0, csq: 20, signal_dbm: -70, latitude: 19.0760, longitude: 72.9987, speed_knots: 25.4, valid: true, sample_count: 12000 + k });
-      telemetryData.push({ device_id: devices[2].id, customer_id: customers[2].id, ts, temperature_c: -3.5 + wave, raw_temperature_c: -3.7 + wave, cold_junction_c: 29.8, alarm_state: 1, fault_code: 0, csq: 18, signal_dbm: -72, latitude: 12.8452, longitude: 77.6602, speed_knots: 0, valid: true, sample_count: 12000 + k });
-    }
-    await Telemetry.bulkCreate(telemetryData);
-
-    await Alarm.bulkCreate([
-      { device_id: devices[1].id, customer_id: customers[1].id, alarm_type: "high_temp", severity: "critical", active: true, first_occurred_at: new Date(Date.now() - 30 * 60_000), last_occurred_at: new Date(Date.now() - 60_000), occurrences: 15, value: 12.4, message: "Temperature above high threshold" },
-      { device_id: devices[2].id, customer_id: customers[2].id, alarm_type: "low_temp", severity: "critical", active: true, first_occurred_at: new Date(Date.now() - 30 * 60_000), last_occurred_at: new Date(Date.now() - 60_000), occurrences: 15, value: -3.5, message: "Temperature below low threshold" }
-    ]);
-
-    reply.status(200).send({ seeded: true, message: "Demo data created successfully" });
+    reply.status(200).send({ seeded: true, message: "Reference data seeded. Telemetry will populate as devices connect." });
   } catch (error) {
     console.error("Seed Demo Error:", error);
     reply.status(500).send({ error: "Failed to seed database" });
