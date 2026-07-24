@@ -130,6 +130,7 @@ export const seedDatabaseProgrammatically = async () => {
       { customer_id: customers[2].id, site_id: sites[2].id, name: "Truck-FR-102", vehicle_number: "IN KA 03 AB 1002", kind: "vehicle" }
     ], { returning: true });
 
+    
     // 5. Create Devices (1 to 5)
     const devices = await Device.bulkCreate([
       { customer_id: customers[0].id, site_id: sites[0].id, asset_id: assets[0].id, device_id: "SLM0000001", imei: "863110081000001", name: "Logger SLM0000001", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 30 * 86400000) },
