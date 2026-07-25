@@ -16,6 +16,58 @@ const TOPICS = [
   "Himardri/data/#"
 ];
 
+function parseIndianTimestamp(payload) {
+  let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time;
+  
+  if (!dateVal && payload.date) {
+    dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
+  }
+
+  if (payload.epoch) {
+    const epochNum = Number(payload.epoch);
+    if (Number.isFinite(epochNum)) {
+      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
+    }
+  }
+
+  if (typeof dateVal === "number" && Number.isFinite(dateVal)) {
+    return new Date(dateVal > 1e11 ? dateVal : dateVal * 1000);
+  }
+
+  if (dateVal && typeof dateVal === "string") {
+    let str = dateVal.trim();
+
+    if (/^\d+$/.test(str)) {
+      const epochNum = Number(str);
+      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
+    }
+
+    // Format: YYYY-MM-DD HH:mm:ss or YYYY-MM-DDTHH:mm:ss without timezone -> parse as IST (+05:30)
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
+      str = str.replace(' ', 'T') + '+05:30';
+    }
+    // Format: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss -> convert to ISO with +05:30
+    else if (/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
+      const m = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/);
+      str = `${m[3]}-${m[2]}-${m[1]}T${m[4]}+05:30`;
+    }
+    // Format: YYYY/MM/DD HH:mm:ss -> convert to ISO with +05:30
+    else if (/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
+      const m = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
+      str = `${m[1]}-${m[2]}-${m[3]}T${m[4]}+05:30`;
+    }
+
+    const parsed = new Date(str);
+    if (!isNaN(parsed.getTime())) {
+      const now = new Date();
+      // Cap at current server time if device clock is slightly ahead
+      return parsed > now ? now : parsed;
+    }
+  }
+
+  return new Date();
+}
+
 export const initMqttSubscriber = () => {
   const options = {};
   const username = process.env.MQTT_USER || "ibfps";
@@ -86,19 +138,8 @@ export const initMqttSubscriber = () => {
         return;
       }
 
-      // Parse timestamp (epoch seconds/ms or ISO timestamp string)
-      let ts = new Date();
-      if (payload.epoch) {
-        const epochNum = Number(payload.epoch);
-        if (Number.isFinite(epochNum)) {
-          ts = new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
-        }
-      } else if (payload.timestamp) {
-        const parsed = new Date(payload.timestamp);
-        if (!isNaN(parsed.getTime())) {
-          ts = parsed;
-        }
-      }
+      // Parse timestamp from device payload (supporting IST local time, ISO, Epoch, etc.)
+      const ts = parseIndianTimestamp(payload);
 
       // Parse GPS & Telemetry fields (support top-level properties and nested `gps` object)
       const gps = payload.gps || {};
