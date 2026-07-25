@@ -17,21 +17,11 @@ const TOPICS = [
 ];
 
 function parseIndianTimestamp(payload) {
+  // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25")
   let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time;
   
   if (!dateVal && payload.date) {
     dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
-  }
-
-  if (payload.epoch) {
-    const epochNum = Number(payload.epoch);
-    if (Number.isFinite(epochNum)) {
-      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
-    }
-  }
-
-  if (typeof dateVal === "number" && Number.isFinite(dateVal)) {
-    return new Date(dateVal > 1e11 ? dateVal : dateVal * 1000);
   }
 
   if (dateVal && typeof dateVal === "string") {
@@ -42,26 +32,45 @@ function parseIndianTimestamp(payload) {
       return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
     }
 
-    // Format: YYYY-MM-DD HH:mm:ss or YYYY-MM-DDTHH:mm:ss without timezone -> parse as IST (+05:30)
+    // ISO string with timezone offset or 'Z' (e.g. "2026-07-25T12:33:25+05:30" or "2026-07-25T07:03:25Z")
+    if (/[Z+-]\d{2}:?\d{2}$/.test(str) || str.endsWith("Z")) {
+      const parsed = new Date(str);
+      if (!isNaN(parsed.getTime())) return parsed;
+    }
+
+    // ISO/SQL string without timezone offset e.g. "2026-07-25T12:33:25" or "2026-07-25 12:33:25"
+    // The device sends local Indian Time (IST, +05:30)
     if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
-      str = str.replace(' ', 'T') + '+05:30';
+      const parsed = new Date(str.replace(' ', 'T') + '+05:30');
+      if (!isNaN(parsed.getTime())) return parsed;
     }
-    // Format: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss -> convert to ISO with +05:30
-    else if (/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
+
+    // Format: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss
+    if (/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/);
-      str = `${m[3]}-${m[2]}-${m[1]}T${m[4]}+05:30`;
+      const parsed = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}+05:30`);
+      if (!isNaN(parsed.getTime())) return parsed;
     }
-    // Format: YYYY/MM/DD HH:mm:ss -> convert to ISO with +05:30
-    else if (/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
+
+    // Format: YYYY/MM/DD HH:mm:ss
+    if (/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
-      str = `${m[1]}-${m[2]}-${m[3]}T${m[4]}+05:30`;
+      const parsed = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}+05:30`);
+      if (!isNaN(parsed.getTime())) return parsed;
     }
 
     const parsed = new Date(str);
-    if (!isNaN(parsed.getTime())) {
-      const now = new Date();
-      // Cap at current server time if device clock is slightly ahead
-      return parsed > now ? now : parsed;
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+
+  if (typeof dateVal === "number" && Number.isFinite(dateVal)) {
+    return new Date(dateVal > 1e11 ? dateVal : dateVal * 1000);
+  }
+
+  if (payload.epoch) {
+    const epochNum = Number(payload.epoch);
+    if (Number.isFinite(epochNum)) {
+      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
     }
   }
 
@@ -149,7 +158,8 @@ export const initMqttSubscriber = () => {
       const course_deg = payload.course_deg ?? payload.course ?? gps.course_deg ?? gps.course ?? 0.0;
       const satellites = payload.satellites ?? gps.satellites ?? null;
       const isValid = payload.valid !== undefined ? Boolean(payload.valid) : (gps.valid !== undefined ? Boolean(gps.valid) : true);
-      const temp = payload.temperature_c !== undefined ? Number(payload.temperature_c) : (payload.temp !== undefined ? Number(payload.temp) : null);
+      const tempRaw = payload.temperature_c !== undefined ? Number(payload.temperature_c) : (payload.temp !== undefined ? Number(payload.temp) : null);
+      const temp = tempRaw !== null && !isNaN(tempRaw) ? Number(tempRaw.toFixed(2)) : null;
       const faultCode = payload.fault_code !== undefined ? Number(payload.fault_code) : 0;
 
       // 1. Insert Telemetry to InfluxDB
