@@ -5,6 +5,13 @@ import { Op } from "sequelize";
 import { queryApi, bucket } from "../config/influx.js";
 import { broadcastRealtimeEvent } from "../../server.js";
 
+const getConnectionState = (lastSeenAt) => {
+  if (!lastSeenAt) return "offline";
+  const diffMs = Date.now() - new Date(lastSeenAt).getTime();
+  if (diffMs < 5 * 60 * 1000) return "online"; // Under 5 minutes = online
+  return "offline"; // 5 minutes or older = offline
+};
+
 // GET dashboard summary
 export const getDashboardSummary = async (request, reply) => {
   try {
@@ -14,6 +21,12 @@ export const getDashboardSummary = async (request, reply) => {
     const customersCount = await Customer.count({ where: { active: true } });
 
     const statuses = await DeviceStatus.findAll();
+    const formattedStatuses = statuses.map((status) => {
+      const raw = status.toJSON();
+      raw.connection_state = getConnectionState(raw.last_seen_at);
+      return raw;
+    });
+
     const activeAlarms = await Alarm.findAll({ where: { active: true } });
 
     const recentAlarms = [...activeAlarms]
@@ -27,19 +40,19 @@ export const getDashboardSummary = async (request, reply) => {
 
     const totals = {
       devices: devicesCount,
-      online: statuses.filter((s) => s.connection_state === "online").length,
-      offline: statuses.filter((s) => s.connection_state === "offline").length,
-      delayed: statuses.filter((s) => s.connection_state === "delayed").length,
+      online: formattedStatuses.filter((s) => s.connection_state === "online").length,
+      offline: formattedStatuses.filter((s) => s.connection_state === "offline").length,
+      delayed: formattedStatuses.filter((s) => s.connection_state === "delayed").length,
       inAlarm: devicesInAlarm.size,
       sensorFault: devicesInFault.size,
-      noGps: statuses.filter((s) => !s.latitude || !s.longitude || Number(s.latitude) === 0).length,
-      firmwareOld: statuses.filter((s) => s.firmware_version && s.firmware_version !== "2.0.5").length,
+      noGps: formattedStatuses.filter((s) => !s.latitude || !s.longitude || Number(s.latitude) === 0).length,
+      firmwareOld: formattedStatuses.filter((s) => s.firmware_version && s.firmware_version !== "2.0.5").length,
       sites: sitesCount,
       assets: assetsCount,
       customers: customersCount,
     };
 
-    reply.status(200).send({ totals, statuses, alarms: recentAlarms });
+    reply.status(200).send({ totals, statuses: formattedStatuses, alarms: recentAlarms });
   } catch (error) {
     console.error("Summary error:", error);
     reply.status(500).send({ error: "Internal server error" });
@@ -157,6 +170,7 @@ export const updateDevice = async (request, reply) => {
     if (updatedStatus) {
       try {
         const fullStatus = updatedStatus.toJSON();
+        fullStatus.connection_state = getConnectionState(fullStatus.last_seen_at);
         broadcastRealtimeEvent("device_status_update", {
           ...fullStatus,
           device_id: device.device_id,
@@ -192,14 +206,6 @@ export const deleteDevice = async (request, reply) => {
     console.error("Delete device error:", error);
     reply.status(400).send({ error: error.message || "Failed to delete device" });
   }
-};
-
-const getConnectionState = (lastSeenAt) => {
-  if (!lastSeenAt) return "offline";
-  const diffMs = Date.now() - new Date(lastSeenAt).getTime();
-  if (diffMs < 18000) return "online";
-  if (diffMs < 45000) return "delayed";
-  return "offline";
 };
 
 // GET device status
@@ -288,26 +294,30 @@ export const getTelemetry = async (request, reply) => {
   try {
     const { device_id, limit = 120, start_date, end_date } = request.query;
 
-    if (!device_id) {
-      reply.status(200).send([]);
-      return;
-    }
+    let deviceFilter = "";
+    let deviceMap = new Map();
 
-    // Find the device to translate UUID to string device code (or vice-versa)
-    let device = null;
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
-    if (isUUID) {
-      device = await Device.findByPk(device_id);
+    if (device_id) {
+      let device = null;
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
+      if (isUUID) {
+        device = await Device.findByPk(device_id);
+      } else {
+        device = await Device.findOne({ where: { device_id } });
+      }
+
+      if (!device) {
+        reply.status(200).send([]);
+        return;
+      }
+      deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device.device_id}")`;
+      deviceMap.set(device.device_id, device.id);
     } else {
-      device = await Device.findOne({ where: { device_id } });
+      const allDevs = await Device.findAll();
+      for (const d of allDevs) {
+        deviceMap.set(d.device_id, d.id);
+      }
     }
-
-    if (!device) {
-      reply.status(200).send([]);
-      return;
-    }
-
-    const deviceCode = device.device_id;
 
     const end = end_date ? new Date(end_date) : new Date();
     const start = start_date ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
@@ -317,9 +327,9 @@ export const getTelemetry = async (request, reply) => {
       from(bucket: "${bucket}")
         |> range(start: ${start.toISOString()}, stop: ${end.toISOString()})
         |> filter(fn: (r) => r["_measurement"] == "telemetry")
-        |> filter(fn: (r) => r["device_id"] == "${deviceCode}")
+        ${deviceFilter}
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-        |> keep(columns: ["_time", "temperature", "latitude", "longitude", "speed", "course", "valid"])
+        |> keep(columns: ["_time", "device_id", "temperature", "latitude", "longitude", "speed", "course", "valid"])
         |> sort(columns: ["_time"], desc: false)
         |> limit(n: ${queryLimit})
     `;
@@ -332,7 +342,8 @@ export const getTelemetry = async (request, reply) => {
             const o = tableMeta.toObject(row);
             rows.push({
               ts: o._time,
-              device_id: device.id,
+              device_id: deviceMap.get(o.device_id) || o.device_id,
+              device_code: o.device_id,
               temperature_c: o.temperature,
               latitude: o.latitude,
               longitude: o.longitude,
