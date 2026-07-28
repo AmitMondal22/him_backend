@@ -719,67 +719,8 @@ export const deleteUserRole = async (request, reply) => {
   }
 };
 
-// DB Seeder RPC handler — creates structural reference data only (no fake telemetry)
 export const seedDemo = async (request, reply) => {
-  try {
-    const userId = request.user.id;
-    const customerCount = await Customer.count();
-    if (customerCount > 0) {
-      reply.status(200).send({ seeded: false, message: "Demo data already exists" });
-      return;
-    }
-
-    const roleExists = await UserRole.findOne({ where: { user_id: userId, role: "super_admin" } });
-    if (!roleExists) {
-      await UserRole.create({ user_id: userId, role: "super_admin" });
-    }
-
-    const org = await Organization.create({ name: "Igtam Technologies" });
-
-    const customers = await Customer.bulkCreate([
-      { organization_id: org.id, name: "ColdChain Logistics India", contact_email: "ops@coldchain.in", contact_phone: "+91 98100 00001" },
-      { organization_id: org.id, name: "MediPharma Distributors", contact_email: "logistics@medipharma.in", contact_phone: "+91 98100 00002" },
-      { organization_id: org.id, name: "FreshFrost Foods", contact_email: "fleet@freshfrost.in", contact_phone: "+91 98100 00003" }
-    ], { returning: true });
-
-    for (const cust of customers) {
-      await UserRole.create({ user_id: userId, role: "customer_admin", customer_id: cust.id });
-    }
-
-    const sites = await Site.bulkCreate([
-      { customer_id: customers[0].id, name: "Delhi Central Hub", address: "Okhla Phase III, New Delhi", latitude: 28.5355, longitude: 77.2910 },
-      { customer_id: customers[1].id, name: "Mumbai Vashi Depot", address: "APMC Market, Vashi, Navi Mumbai", latitude: 19.0760, longitude: 72.9987 },
-      { customer_id: customers[2].id, name: "Bengaluru South Cold Store", address: "Electronic City, Bengaluru", latitude: 12.8452, longitude: 77.6602 }
-    ], { returning: true });
-
-    const assets = await Asset.bulkCreate([
-      { customer_id: customers[0].id, site_id: sites[0].id, name: "Truck-CO-100", vehicle_number: "IN DL 01 AB 1000", kind: "vehicle" },
-      { customer_id: customers[1].id, site_id: sites[1].id, name: "Truck-ME-101", vehicle_number: "IN MH 02 AB 1001", kind: "vehicle" },
-      { customer_id: customers[2].id, site_id: sites[2].id, name: "Truck-FR-102", vehicle_number: "IN KA 03 AB 1002", kind: "vehicle" }
-    ], { returning: true });
-
-    const devices = await Device.bulkCreate([
-      { customer_id: customers[0].id, site_id: sites[0].id, asset_id: assets[0].id, device_id: "SLM0000001", imei: "863110081000001", name: "Logger SLM0000001", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 30 * 86400000) },
-      { customer_id: customers[1].id, site_id: sites[1].id, asset_id: assets[1].id, device_id: "SLM0000002", imei: "863110081000002", name: "Logger SLM0000002", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 31 * 86400000) },
-      { customer_id: customers[2].id, site_id: sites[2].id, asset_id: assets[2].id, device_id: "SLM0000003", imei: "863110081000003", name: "Logger SLM0000003", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 32 * 86400000) },
-      { customer_id: customers[0].id, site_id: sites[0].id, asset_id: assets[0].id, device_id: "SLM0000004", imei: "863110081000004", name: "Logger SLM0000004", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 33 * 86400000) },
-      { customer_id: customers[2].id, site_id: sites[2].id, asset_id: assets[2].id, device_id: "SLM0000005", imei: "863110081000005", name: "Logger SLM0000005", sensor_type: "MAX31856", thermocouple_type: "K", low_threshold: 2.0, high_threshold: 8.0, upload_interval_s: 60, installed_at: new Date(Date.now() - 34 * 86400000) }
-    ], { returning: true });
-
-    // Create initial device status rows (will be updated by real MQTT data)
-    await DeviceStatus.bulkCreate([
-      { device_id: devices[0].id, customer_id: customers[0].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
-      { device_id: devices[1].id, customer_id: customers[1].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
-      { device_id: devices[2].id, customer_id: customers[2].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
-      { device_id: devices[3].id, customer_id: customers[0].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
-      { device_id: devices[4].id, customer_id: customers[2].id, connection_state: "offline", last_seen_at: null, last_startup_at: null },
-    ]);
-
-    reply.status(200).send({ seeded: true, message: "Reference data seeded. Telemetry will populate as devices connect." });
-  } catch (error) {
-    console.error("Seed Demo Error:", error);
-    reply.status(500).send({ error: "Failed to seed database" });
-  }
+  reply.status(200).send({ seeded: false, message: "Database seeding is disabled." });
 };
 
 // CRUD: NotificationRules

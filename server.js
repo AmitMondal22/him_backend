@@ -2,7 +2,6 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import dotenv from "dotenv";
 import { sequelize } from "./src/config/database.js";
-import { seedDatabaseProgrammatically, ensureInfluxData } from "./src/utils/seeder.js";
 import apiRoutes from "./src/routes/api.js";
 import { initMqttSubscriber } from "./src/mqtt/subscriber.js";
 import { formatDatesInObject } from "./src/utils/timezone.js";
@@ -73,10 +72,6 @@ async function startServer() {
     console.log("[DB] Syncing database models...");
     await sequelize.sync({ alter: true });
     console.log("[DB] Database models synced.");
-
-    // Programmatically seed dummy database if empty
-    await seedDatabaseProgrammatically();
-    await ensureInfluxData();
 
     // Boot MQTT Telemetry subscriber
     initMqttSubscriber();
