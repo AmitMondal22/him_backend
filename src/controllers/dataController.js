@@ -523,6 +523,60 @@ export const getCustomers = async (request, reply) => {
   }
 };
 
+export const getCustomerById = async (request, reply) => {
+  try {
+    const customer = await Customer.findByPk(request.params.id);
+    if (!customer) {
+      reply.status(404).send({ error: "Customer not found" });
+      return;
+    }
+    reply.status(200).send(customer);
+  } catch (error) {
+    console.error("Get customer error:", error);
+    reply.status(500).send({ error: "Failed to get customer" });
+  }
+};
+
+export const createCustomer = async (request, reply) => {
+  try {
+    const customer = await Customer.create(request.body);
+    reply.status(201).send(customer);
+  } catch (error) {
+    console.error("Create customer error:", error);
+    reply.status(400).send({ error: error.message || "Failed to create customer" });
+  }
+};
+
+export const updateCustomer = async (request, reply) => {
+  try {
+    const customer = await Customer.findByPk(request.params.id);
+    if (!customer) {
+      reply.status(404).send({ error: "Customer not found" });
+      return;
+    }
+    await customer.update(request.body);
+    reply.status(200).send(customer);
+  } catch (error) {
+    console.error("Update customer error:", error);
+    reply.status(400).send({ error: error.message || "Failed to update customer" });
+  }
+};
+
+export const deleteCustomer = async (request, reply) => {
+  try {
+    const customer = await Customer.findByPk(request.params.id);
+    if (!customer) {
+      reply.status(404).send({ error: "Customer not found" });
+      return;
+    }
+    await customer.destroy();
+    reply.status(200).send({ message: "Customer deleted successfully" });
+  } catch (error) {
+    console.error("Delete customer error:", error);
+    reply.status(400).send({ error: error.message || "Failed to delete customer" });
+  }
+};
+
 // GET roles
 export const getUserRoles = async (request, reply) => {
   try {

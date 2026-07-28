@@ -4,14 +4,14 @@ import {
   getDeviceStatuses, getDeviceStatus, getTelemetry, getAlarms, updateAlarm,
   getSites, createSite, updateSite, deleteSite,
   getAssets, createAsset, updateAsset, deleteAsset,
-  getCustomers, getUserRoles, seedDemo,
+  getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getUserRoles, seedDemo,
   getProfiles, getProfileById, updateProfile, deleteProfile,
   getUserRolesAll, createUserRole, deleteUserRole,
   getNotificationRules, createNotificationRule, updateNotificationRule, deleteNotificationRule
 } from "../controllers/dataController.js";
 import { requireAuth } from "../middlewares/authMiddleware.js";
 import { 
-  signupSchema, signinSchema, deviceSchema, siteSchema, assetSchema 
+  signupSchema, signinSchema, deviceSchema, siteSchema, assetSchema, customerSchema 
 } from "../validation/schemas.js";
 
 // Validation helper hook
@@ -69,6 +69,10 @@ export default async function apiRoutes(fastify, options) {
 
     // Customers
     protectedFastify.get("/customers", getCustomers);
+    protectedFastify.get("/customers/:id", getCustomerById);
+    protectedFastify.post("/customers", { preHandler: validate(customerSchema) }, createCustomer);
+    protectedFastify.put("/customers/:id", { preHandler: validate(customerSchema.fork(["name"], (s) => s.optional())) }, updateCustomer);
+    protectedFastify.delete("/customers/:id", deleteCustomer);
 
     // User roles
     protectedFastify.get("/roles", getUserRoles);
