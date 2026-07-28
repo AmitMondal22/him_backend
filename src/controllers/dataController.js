@@ -569,6 +569,12 @@ export const deleteCustomer = async (request, reply) => {
       reply.status(404).send({ error: "Customer not found" });
       return;
     }
+    // Unassign customer_id references on child entities before deleting customer so only single record is deleted
+    await Device.update({ customer_id: null }, { where: { customer_id: customer.id } });
+    await Site.update({ customer_id: null }, { where: { customer_id: customer.id } });
+    await Asset.update({ customer_id: null }, { where: { customer_id: customer.id } });
+    await Alarm.update({ customer_id: null }, { where: { customer_id: customer.id } });
+
     await customer.destroy();
     reply.status(200).send({ message: "Customer deleted successfully" });
   } catch (error) {
