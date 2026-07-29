@@ -165,19 +165,30 @@ export const initMqttSubscriber = () => {
       const tempParsed = tempRaw !== null && !isNaN(tempRaw) ? Number(tempRaw.toFixed(2)) : null;
       const faultCode = payload.fault_code !== undefined ? Number(payload.fault_code) : 0;
 
-      // Filter out only 0°C readings as invalid sensor zero values (allowing all other temperatures including <= -200°C)
+      // Filter out 0°C readings: 1-4 times ignored without DB store, 5+ times marked as OPEN sensor
       const isZeroTemp = tempParsed === null || Math.abs(tempParsed) < 0.0001;
       const validTemp = isZeroTemp ? null : tempParsed;
 
+      let currentZeroCount = 0;
       if (isZeroTemp && tempRaw !== null) {
-        const currentZeroCount = (deviceZeroCounts.get(device.id) || 0) + 1;
+        currentZeroCount = (deviceZeroCounts.get(device.id) || 0) + 1;
         deviceZeroCounts.set(device.id, currentZeroCount);
-        console.warn(`[MQTT] Device ${device.device_id}: Received temperature 0°C (repeat count: ${currentZeroCount}). Ignoring 0 reading and NOT storing to database.`);
+        console.warn(`[MQTT] Device ${device.device_id}: Received temperature 0°C (repeat count: ${currentZeroCount}).`);
       } else if (!isZeroTemp) {
         deviceZeroCounts.set(device.id, 0);
+        try {
+          await Alarm.update(
+            { active: false },
+            { where: { device_id: device.id, alarm_type: "thermocouple_open", active: true } }
+          );
+        } catch (alarmErr) {
+          console.error("[MQTT] Error resolving thermocouple_open alarm:", alarmErr);
+        }
       }
 
-      // 1. Insert Telemetry to InfluxDB (Only write when non-zero temperature is present)
+      const isSensorOpen = currentZeroCount >= 5;
+
+      // 1. Insert Telemetry to InfluxDB (Only write when valid non-zero temperature is present)
       if (validTemp !== null) {
         try {
           const point = new Point('telemetry')
@@ -197,12 +208,15 @@ export const initMqttSubscriber = () => {
         }
       }
 
-      // 2. Upsert DeviceStatus (Preserve previous valid temperature_c if incoming is 0)
+      // 2. Upsert DeviceStatus
+      // If 5+ zeroes received: clear temperature_c (set to null) so status indicates OPEN
+      const initialTempC = validTemp !== null ? validTemp : (isSensorOpen ? null : undefined);
+
       const [status, created] = await DeviceStatus.findOrCreate({
         where: { device_id: device.id },
         defaults: {
           customer_id: device.customer_id,
-          temperature_c: validTemp,
+          temperature_c: initialTempC,
           latitude: latitude,
           longitude: longitude,
           speed_knots: speed_knots,
@@ -217,8 +231,9 @@ export const initMqttSubscriber = () => {
       });
 
       if (!created) {
+        const nextTempC = validTemp !== null ? validTemp : (isSensorOpen ? null : status.temperature_c);
         await status.update({
-          temperature_c: validTemp !== null ? validTemp : status.temperature_c,
+          temperature_c: nextTempC,
           latitude: latitude !== null ? latitude : status.latitude,
           longitude: longitude !== null ? longitude : status.longitude,
           speed_knots: speed_knots,
@@ -236,6 +251,7 @@ export const initMqttSubscriber = () => {
         broadcastRealtimeEvent("device_status_update", {
           ...fullStatus,
           device_id: device.device_id, // ensure string device_id format
+          is_sensor_open: isSensorOpen,
           devices: {
             device_id: device.device_id,
             name: device.name,
@@ -258,7 +274,14 @@ export const initMqttSubscriber = () => {
           });
         }
 
-        if (tempParsed !== null && Number.isFinite(tempParsed) && !isZeroTemp) {
+        if (isSensorOpen) {
+          alarmsToUpsert.push({
+            type: "thermocouple_open",
+            severity: "critical",
+            msg: `Thermocouple OPEN / Disconnected (Received 0°C reading ${currentZeroCount} consecutive times)`,
+            value: 0
+          });
+        } else if (tempParsed !== null && Number.isFinite(tempParsed) && !isZeroTemp) {
           if (tempParsed <= -200) {
             // Temperature <= -200°C indicates thermocouple disconnect / open circuit (e.g., -242.02°C)
             alarmsToUpsert.push({
