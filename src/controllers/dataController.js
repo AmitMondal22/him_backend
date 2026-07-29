@@ -340,17 +340,21 @@ export const getTelemetry = async (request, reply) => {
         queryApi.queryRows(query, {
           next(row, tableMeta) {
             const o = tableMeta.toObject(row);
-            rows.push({
-              ts: o._time,
-              device_id: deviceMap.get(o.device_id) || o.device_id,
-              device_code: o.device_id,
-              temperature_c: o.temperature,
-              latitude: o.latitude,
-              longitude: o.longitude,
-              speed_knots: o.speed,
-              course_deg: o.course,
-              valid: o.valid
-            });
+            const tempVal = o.temperature != null ? Number(o.temperature) : null;
+            // Ignore only 0°C readings (allowing all other temperatures including <= -200°C)
+            if (tempVal !== null && Math.abs(tempVal) > 0.0001) {
+              rows.push({
+                ts: o._time,
+                device_id: deviceMap.get(o.device_id) || o.device_id,
+                device_code: o.device_id,
+                temperature_c: tempVal,
+                latitude: o.latitude,
+                longitude: o.longitude,
+                speed_knots: o.speed,
+                course_deg: o.course,
+                valid: o.valid
+              });
+            }
           },
           error(err) {
             console.warn("InfluxDB query error:", err.message);

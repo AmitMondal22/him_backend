@@ -16,6 +16,9 @@ const TOPICS = [
   "Himardri/data/#"
 ];
 
+// Map tracking consecutive 0°C readings per device
+const deviceZeroCounts = new Map();
+
 function parseIndianTimestamp(payload) {
   // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25")
   let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time;
@@ -159,33 +162,47 @@ export const initMqttSubscriber = () => {
       const satellites = payload.satellites ?? gps.satellites ?? null;
       const isValid = payload.valid !== undefined ? Boolean(payload.valid) : (gps.valid !== undefined ? Boolean(gps.valid) : true);
       const tempRaw = payload.temperature_c !== undefined ? Number(payload.temperature_c) : (payload.temp !== undefined ? Number(payload.temp) : null);
-      const temp = tempRaw !== null && !isNaN(tempRaw) ? Number(tempRaw.toFixed(2)) : null;
+      const tempParsed = tempRaw !== null && !isNaN(tempRaw) ? Number(tempRaw.toFixed(2)) : null;
       const faultCode = payload.fault_code !== undefined ? Number(payload.fault_code) : 0;
 
-      // 1. Insert Telemetry to InfluxDB
-      try {
-        const point = new Point('telemetry')
-          .tag('device_id', device.device_id)
-          .floatField('temperature', temp !== null ? Number(temp) : 0.0)
-          .floatField('latitude', latitude !== null ? Number(latitude) : 0.0)
-          .floatField('longitude', longitude !== null ? Number(longitude) : 0.0)
-          .floatField('speed', Number(speed_knots || 0.0))
-          .floatField('course', Number(course_deg || 0.0))
-          .booleanField('valid', isValid)
-          .timestamp(ts);
+      // Filter out only 0°C readings as invalid sensor zero values (allowing all other temperatures including <= -200°C)
+      const isZeroTemp = tempParsed === null || Math.abs(tempParsed) < 0.0001;
+      const validTemp = isZeroTemp ? null : tempParsed;
 
-        writeApi.writePoint(point);
-        await writeApi.flush();
-      } catch (err) {
-        console.error("[InfluxDB] Failed to write telemetry point:", err);
+      if (isZeroTemp && tempRaw !== null) {
+        const currentZeroCount = (deviceZeroCounts.get(device.id) || 0) + 1;
+        deviceZeroCounts.set(device.id, currentZeroCount);
+        console.warn(`[MQTT] Device ${device.device_id}: Received temperature 0°C (repeat count: ${currentZeroCount}). Ignoring 0 reading and NOT storing to database.`);
+      } else if (!isZeroTemp) {
+        deviceZeroCounts.set(device.id, 0);
       }
 
-      // 2. Upsert DeviceStatus
+      // 1. Insert Telemetry to InfluxDB (Only write when non-zero temperature is present)
+      if (validTemp !== null) {
+        try {
+          const point = new Point('telemetry')
+            .tag('device_id', device.device_id)
+            .floatField('temperature', Number(validTemp))
+            .floatField('latitude', latitude !== null ? Number(latitude) : 0.0)
+            .floatField('longitude', longitude !== null ? Number(longitude) : 0.0)
+            .floatField('speed', Number(speed_knots || 0.0))
+            .floatField('course', Number(course_deg || 0.0))
+            .booleanField('valid', isValid)
+            .timestamp(ts);
+
+          writeApi.writePoint(point);
+          await writeApi.flush();
+        } catch (err) {
+          console.error("[InfluxDB] Failed to write telemetry point:", err);
+        }
+      }
+
+      // 2. Upsert DeviceStatus (Preserve previous valid temperature_c if incoming is 0)
       const [status, created] = await DeviceStatus.findOrCreate({
         where: { device_id: device.id },
         defaults: {
           customer_id: device.customer_id,
-          temperature_c: temp,
+          temperature_c: validTemp,
           latitude: latitude,
           longitude: longitude,
           speed_knots: speed_knots,
@@ -201,7 +218,7 @@ export const initMqttSubscriber = () => {
 
       if (!created) {
         await status.update({
-          temperature_c: temp !== null ? temp : status.temperature_c,
+          temperature_c: validTemp !== null ? validTemp : status.temperature_c,
           latitude: latitude !== null ? latitude : status.latitude,
           longitude: longitude !== null ? longitude : status.longitude,
           speed_knots: speed_knots,
@@ -237,34 +254,34 @@ export const initMqttSubscriber = () => {
             type: "sensor_fault",
             severity: "high",
             msg: `Sensor fault detected (fault code ${faultCode})`,
-            value: temp
+            value: validTemp !== null ? validTemp : tempRaw
           });
         }
 
-        if (temp !== null && Number.isFinite(temp)) {
-          if (temp <= -200) {
+        if (tempParsed !== null && Number.isFinite(tempParsed) && !isZeroTemp) {
+          if (tempParsed <= -200) {
             // Temperature <= -200°C indicates thermocouple disconnect / open circuit (e.g., -242.02°C)
             alarmsToUpsert.push({
               type: "thermocouple_open",
               severity: "critical",
-              msg: `Thermocouple open circuit / fault reading (${temp}°C)`,
-              value: temp
+              msg: `Thermocouple open circuit / fault reading (${tempParsed}°C)`,
+              value: tempParsed
             });
           } else {
-            if (temp > Number(device.high_threshold)) {
+            if (tempParsed > Number(device.high_threshold)) {
               alarmsToUpsert.push({
                 type: "high_temp",
                 severity: "critical",
-                msg: `Temperature ${temp}°C > ${device.high_threshold}°C limit`,
-                value: temp
+                msg: `Temperature ${tempParsed}°C > ${device.high_threshold}°C limit`,
+                value: tempParsed
               });
             }
-            if (temp < Number(device.low_threshold)) {
+            if (tempParsed < Number(device.low_threshold)) {
               alarmsToUpsert.push({
                 type: "low_temp",
                 severity: "critical",
-                msg: `Temperature ${temp}°C < ${device.low_threshold}°C limit`,
-                value: temp
+                msg: `Temperature ${tempParsed}°C < ${device.low_threshold}°C limit`,
+                value: tempParsed
               });
             }
           }
