@@ -24,7 +24,7 @@ export const deviceSchema = Joi.object({
   upload_interval_s: Joi.number().integer().allow(null).default(60),
   alarm_enabled: Joi.boolean().default(true),
   active: Joi.boolean().default(true),
-  customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
+  customer_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
   site_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
   asset_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
 });
@@ -35,7 +35,7 @@ export const siteSchema = Joi.object({
   latitude: Joi.number().allow(null).optional(),
   longitude: Joi.number().allow(null).optional(),
   active: Joi.boolean().optional(),
-  customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
+  customer_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
 });
 
 export const assetSchema = Joi.object({
@@ -43,7 +43,7 @@ export const assetSchema = Joi.object({
   vehicle_number: Joi.string().allow("", null).optional(),
   kind: Joi.string().default("vehicle"),
   active: Joi.boolean().optional(),
-  customer_id: Joi.string().guid({ version: "uuidv4" }).required(),
+  customer_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
   site_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
 });
 
