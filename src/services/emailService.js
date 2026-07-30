@@ -37,6 +37,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     info: "#6B7280",
   }[severity] || "#DC2626";
 
+  const tempDisplay = temperature != null ? `${Number(temperature).toFixed(1)}°C` : "N/A";
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-IN", {
     timeZone: "Asia/Kolkata",
