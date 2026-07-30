@@ -29,6 +29,18 @@ await fastify.register(cors, {
   strictPreflight: false,
 });
 
+fastify.addHook("onRequest", async (request, reply) => {
+  const reqOrigin = request.headers.origin || "*";
+  reply.header("Access-Control-Allow-Origin", reqOrigin);
+  reply.header("Access-Control-Allow-Credentials", "true");
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
+
+  if (request.method === "OPTIONS") {
+    reply.status(204).send();
+  }
+});
+
 fastify.setErrorHandler((error, request, reply) => {
   const reqOrigin = request.headers.origin || "*";
   reply.header("Access-Control-Allow-Origin", reqOrigin);
