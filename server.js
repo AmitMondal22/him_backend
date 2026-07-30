@@ -20,8 +20,10 @@ const PORT = process.env.PORT || 5000;
 
 // Register Plugins
 await fastify.register(cors, {
-  origin: "*",
+  origin: true,
   credentials: true,
+  methods: ["GET", "PUT", "POST", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
 });
 
 // SSE Real-time client registry
@@ -44,10 +46,12 @@ await fastify.register(apiRoutes, { prefix: "/api" });
 
 // SSE Endpoint for Live Real-Time Telemetry and Status Updates
 fastify.get("/api/realtime", (request, reply) => {
+  const origin = request.headers.origin || "*";
   reply.raw.setHeader("Content-Type", "text/event-stream");
   reply.raw.setHeader("Cache-Control", "no-cache");
   reply.raw.setHeader("Connection", "keep-alive");
-  reply.raw.setHeader("Access-Control-Allow-Origin", "*");
+  reply.raw.setHeader("Access-Control-Allow-Origin", origin);
+  reply.raw.setHeader("Access-Control-Allow-Credentials", "true");
   reply.raw.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
   sseClients.add(reply);
