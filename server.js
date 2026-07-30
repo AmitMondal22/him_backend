@@ -20,10 +20,21 @@ const PORT = process.env.PORT || 5000;
 
 // Register Plugins
 await fastify.register(cors, {
-  origin: true,
+  origin: (origin, cb) => {
+    cb(null, true);
+  },
   credentials: true,
   methods: ["GET", "PUT", "POST", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+  strictPreflight: false,
+});
+
+fastify.setErrorHandler((error, request, reply) => {
+  const reqOrigin = request.headers.origin || "*";
+  reply.header("Access-Control-Allow-Origin", reqOrigin);
+  reply.header("Access-Control-Allow-Credentials", "true");
+  console.error("Fastify Error:", error);
+  reply.status(error.statusCode || 500).send({ error: error.message || "Internal server error" });
 });
 
 // SSE Real-time client registry
