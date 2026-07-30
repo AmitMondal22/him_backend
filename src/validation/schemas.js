@@ -41,7 +41,7 @@ export const siteSchema = Joi.object({
 export const assetSchema = Joi.object({
   name: Joi.string().required(),
   vehicle_number: Joi.string().allow("", null).optional(),
-  kind: Joi.string().default("vehicle"),
+  kind: Joi.string().allow("", null).default("vehicle").optional(),
   active: Joi.boolean().optional(),
   customer_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
   site_id: Joi.string().guid({ version: "uuidv4" }).allow(null).optional(),
@@ -49,6 +49,7 @@ export const assetSchema = Joi.object({
 
 export const customerSchema = Joi.object({
   name: Joi.string().required(),
-  contact_email: Joi.string().email().allow("").optional(),
-  contact_phone: Joi.string().allow("").optional(),
+  contact_email: Joi.string().email().allow("", null).optional(),
+  contact_phone: Joi.string().allow("", null).optional(),
+  active: Joi.boolean().optional(),
 });
