@@ -37,8 +37,22 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     info: "#6B7280",
   }[severity] || "#DC2626";
 
-  const tempDisplay = temperature != null ? `${Number(temperature).toFixed(1)}°C` : "N/A";
-  const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+  const timeStr = now.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+  const timestamp = `${dateStr} ${timeStr}`;
+  const subjectLine = `⚠ ${alarmLabel} — ${deviceName} — ${tempDisplay} [${timestamp}]`;
 
   const html = `
 <!DOCTYPE html>
@@ -102,7 +116,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: toEmails.join(", "),
-      subject: `⚠ ${alarmLabel} — ${deviceName} — ${tempDisplay}`,
+      subject: subjectLine,
       html,
     });
     console.log(`[Email] Alarm email sent to ${toEmails.join(", ")} for device ${deviceName}`);
