@@ -324,6 +324,15 @@ export const NotificationRule = sequelize.define("NotificationRule", {
     type: DataTypes.STRING,
     allowNull: false,
   },
+  device_ids: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+  },
+  emails: {
+    type: DataTypes.TEXT,
+    allowNull: false,
+    defaultValue: "",
+  },
   alarm_types: {
     type: DataTypes.JSON,
   },
@@ -331,16 +340,13 @@ export const NotificationRule = sequelize.define("NotificationRule", {
     type: DataTypes.STRING,
     defaultValue: "medium",
   },
-  channels: {
-    type: DataTypes.JSON,
-    defaultValue: ["email"],
-  },
-  user_ids: {
-    type: DataTypes.JSON,
-  },
-  escalation_minutes: {
+  cooldown_minutes: {
     type: DataTypes.INTEGER,
-    defaultValue: 0,
+    defaultValue: 30,
+  },
+  last_email_sent_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
   },
   active: {
     type: DataTypes.BOOLEAN,

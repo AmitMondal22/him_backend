@@ -13,6 +13,7 @@ import { requireAuth } from "../middlewares/authMiddleware.js";
 import { 
   signupSchema, signinSchema, deviceSchema, siteSchema, assetSchema, customerSchema 
 } from "../validation/schemas.js";
+import { sendTestEmail } from "../services/emailService.js";
 
 // Validation helper hook
 const validate = (schema) => async (request, reply) => {
@@ -96,5 +97,22 @@ export default async function apiRoutes(fastify, options) {
     protectedFastify.post("/notification_rules", createNotificationRule);
     protectedFastify.put("/notification_rules/:id", updateNotificationRule);
     protectedFastify.delete("/notification_rules/:id", deleteNotificationRule);
+
+    // Test Email
+    protectedFastify.post("/notification_rules/:id/test-email", async (request, reply) => {
+      try {
+        const { NotificationRule } = await import("../models/index.js");
+        const rule = await NotificationRule.findByPk(request.params.id);
+        if (!rule) return reply.status(404).send({ error: "Rule not found" });
+        const emails = (rule.emails || "").split(/[,;\s]+/).map(e => e.trim()).filter(e => e && e.includes("@"));
+        if (emails.length === 0) return reply.status(400).send({ error: "No valid emails configured on this rule" });
+        const sent = await sendTestEmail(emails);
+        if (sent) reply.status(200).send({ message: `Test email sent to ${emails.join(", ")}` });
+        else reply.status(500).send({ error: "Failed to send test email. Check SMTP settings in .env" });
+      } catch (err) {
+        console.error("Test email error:", err);
+        reply.status(500).send({ error: err.message || "Failed to send test email" });
+      }
+    });
   });
 }

@@ -1,10 +1,11 @@
 import mqtt from "mqtt";
 import dotenv from "dotenv";
 import { Op } from "sequelize";
-import { Device, DeviceStatus, Alarm } from "../models/index.js";
+import { Device, DeviceStatus, Alarm, NotificationRule } from "../models/index.js";
 import { Point } from "@influxdata/influxdb-client";
 import { writeApi } from "../config/influx.js";
 import { broadcastRealtimeEvent } from "../../server.js";
+import { sendAlarmEmail } from "../services/emailService.js";
 
 dotenv.config();
 
@@ -338,6 +339,56 @@ export const initMqttSubscriber = () => {
               value: item.value,
               message: item.msg,
             });
+          }
+        }
+
+        // 4. Email Notifications — check matching rules and send if cooldown allows
+        if (alarmsToUpsert.length > 0) {
+          try {
+            const rules = await NotificationRule.findAll({ where: { active: true } });
+            for (const rule of rules) {
+              // Check device match
+              const ruleDeviceIds = Array.isArray(rule.device_ids) ? rule.device_ids : [];
+              if (ruleDeviceIds.length > 0 && !ruleDeviceIds.includes(device.id)) continue;
+
+              // Check alarm type match
+              const ruleAlarmTypes = Array.isArray(rule.alarm_types) ? rule.alarm_types : [];
+              const matchedAlarm = alarmsToUpsert.find(a => ruleAlarmTypes.length === 0 || ruleAlarmTypes.includes(a.type));
+              if (!matchedAlarm) continue;
+
+              // Check severity match
+              const sevOrder = ["info", "low", "medium", "high", "critical"];
+              const minSevIdx = sevOrder.indexOf(rule.min_severity || "medium");
+              const alarmSevIdx = sevOrder.indexOf(matchedAlarm.severity || "medium");
+              if (alarmSevIdx < minSevIdx) continue;
+
+              // Check cooldown
+              const cooldownMs = (rule.cooldown_minutes || 30) * 60 * 1000;
+              if (rule.last_email_sent_at) {
+                const lastSent = new Date(rule.last_email_sent_at).getTime();
+                if (Date.now() - lastSent < cooldownMs) continue;
+              }
+
+              // Parse emails
+              const emails = (rule.emails || "").split(/[,;\s]+/).map(e => e.trim()).filter(e => e && e.includes("@"));
+              if (emails.length === 0) continue;
+
+              // Send email
+              const sent = await sendAlarmEmail(
+                emails,
+                device.device_id || device.name,
+                matchedAlarm.type,
+                matchedAlarm.msg,
+                matchedAlarm.value,
+                matchedAlarm.severity
+              );
+
+              if (sent) {
+                await rule.update({ last_email_sent_at: new Date() });
+              }
+            }
+          } catch (emailErr) {
+            console.error("[MQTT] Email notification error:", emailErr);
           }
         }
       }
