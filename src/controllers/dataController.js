@@ -2,6 +2,7 @@ import {
   Device, DeviceStatus, Alarm, Site, Asset, Customer, UserRole, Organization, User, NotificationRule 
 } from "../models/index.js";
 import { Op } from "sequelize";
+import { sequelize } from "../config/database.js";
 import { queryApi, bucket } from "../config/influx.js";
 import { broadcastRealtimeEvent } from "../../server.js";
 
