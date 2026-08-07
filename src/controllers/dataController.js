@@ -235,32 +235,8 @@ export const deleteDevice = async (request, reply) => {
     await DeviceStatus.destroy({ where: { device_id: devUuid } });
     await Alarm.destroy({ where: { device_id: devUuid } });
 
-    // 2. Exception-guarded InfluxDB time-series telemetry deletion
-    try {
-      const influxUrl = process.env.INFLUX_URL || "http://localhost:8086";
-      const influxToken = process.env.INFLUX_TOKEN || "techavo-secret-admin-token-2026-xyz";
-      const influxOrg = process.env.INFLUX_ORG || "techavo";
-      const influxBucket = process.env.INFLUX_BUCKET || "telemetry";
-
-      const start = "1970-01-01T00:00:00Z";
-      const stop = new Date().toISOString();
-      const predicate = `device_id="${devCode}"`;
-
-      await fetch(`${influxUrl}/api/v2/delete?org=${encodeURIComponent(influxOrg)}&bucket=${encodeURIComponent(influxBucket)}`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${influxToken}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          start,
-          stop,
-          predicate
-        })
-      });
-    } catch (influxErr) {
-      console.warn(`[InfluxDB] Ignored exception when deleting telemetry for device ${devCode}:`, influxErr.message);
-    }
+    // 2. Multi-Endpoint & Multi-Predicate InfluxDB Telemetry Purge
+    await purgeInfluxTelemetry(devCode, devUuid);
 
     // 3. Delete Device record
     await device.destroy();
@@ -271,6 +247,60 @@ export const deleteDevice = async (request, reply) => {
     reply.status(400).send({ error: error.message || "Failed to delete device" });
   }
 };
+
+async function purgeInfluxTelemetry(deviceCode, deviceUuid) {
+  const candidateUrls = [
+    process.env.INFLUX_URL,
+    "http://influxdb:8086",
+    "http://localhost:8086",
+    "http://127.0.0.1:8086"
+  ].filter(Boolean);
+
+  const uniqueUrls = [...new Set(candidateUrls)];
+  const influxToken = process.env.INFLUX_TOKEN || "techavo-secret-admin-token-2026-xyz";
+  const influxOrg = process.env.INFLUX_ORG || "techavo";
+  const influxBucket = process.env.INFLUX_BUCKET || "telemetry";
+
+  const start = "1970-01-01T00:00:00Z";
+  const stop = new Date(Date.now() + 86400000).toISOString();
+
+  const predicates = [
+    `device_id="${deviceCode}"`,
+    `_measurement="telemetry" AND device_id="${deviceCode}"`
+  ];
+  if (deviceUuid && deviceUuid !== deviceCode) {
+    predicates.push(`device_id="${deviceUuid}"`);
+    predicates.push(`_measurement="telemetry" AND device_id="${deviceUuid}"`);
+  }
+
+  for (const baseUrl of uniqueUrls) {
+    for (const pred of predicates) {
+      try {
+        const deleteUrl = `${baseUrl.replace(/\/$/, "")}/api/v2/delete?org=${encodeURIComponent(influxOrg)}&bucket=${encodeURIComponent(influxBucket)}`;
+        const res = await fetch(deleteUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Token ${influxToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            start,
+            stop,
+            predicate: pred
+          })
+        });
+        if (res.ok || res.status === 204) {
+          console.log(`[InfluxDB] Purged telemetry via ${baseUrl} using predicate '${pred}' (Status: ${res.status})`);
+        } else {
+          const text = await res.text().catch(() => "");
+          console.warn(`[InfluxDB] Delete request to ${baseUrl} with predicate '${pred}' returned status ${res.status}: ${text}`);
+        }
+      } catch (err) {
+        // Continue trying next candidate URL
+      }
+    }
+  }
+}
 
 // GET device status
 export const getDeviceStatus = async (request, reply) => {
@@ -361,21 +391,24 @@ export const getTelemetry = async (request, reply) => {
     let deviceFilter = "";
     let deviceMap = new Map();
 
+    let targetDevice = null;
+
     if (device_id) {
-      let device = null;
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
       if (isUUID) {
-        device = await Device.findByPk(device_id);
+        targetDevice = await Device.findByPk(device_id);
       } else {
-        device = await Device.findOne({ where: { device_id } });
+        targetDevice = await Device.findOne({
+          where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(device_id).toLowerCase())
+        });
       }
 
-      if (device) {
-        const lowerCode = String(device.device_id).toLowerCase();
-        deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device.device_id}" or r["device_id"] == "${device.id}" or r["device_id"] == "${device_id}" or r["device_id"] == "${lowerCode}")`;
-        deviceMap.set(device.device_id, device.id);
-        deviceMap.set(lowerCode, device.id);
-        deviceMap.set(device.id, device.id);
+      if (targetDevice) {
+        const lowerCode = String(targetDevice.device_id).toLowerCase();
+        deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${targetDevice.device_id}" or r["device_id"] == "${targetDevice.id}" or r["device_id"] == "${device_id}" or r["device_id"] == "${lowerCode}")`;
+        deviceMap.set(targetDevice.device_id, targetDevice.id);
+        deviceMap.set(lowerCode, targetDevice.id);
+        deviceMap.set(targetDevice.id, targetDevice.id);
       } else {
         deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device_id}")`;
       }
@@ -389,7 +422,16 @@ export const getTelemetry = async (request, reply) => {
     }
 
     const end = end_date ? new Date(end_date) : new Date();
-    const start = start_date ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
+    let start = start_date ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
+
+    // Bound telemetry query start time to target device creation timestamp to avoid showing old report data from deleted instances
+    if (targetDevice && targetDevice.createdAt) {
+      const createdTime = new Date(targetDevice.createdAt);
+      if (!isNaN(createdTime.getTime()) && createdTime > start) {
+        start = createdTime;
+      }
+    }
+
     const queryLimit = (start_date || end_date) ? 5000 : parseInt(limit);
 
     const query = `
