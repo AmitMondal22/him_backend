@@ -17,18 +17,20 @@ const transporter = nodemailer.createTransport({
  * Send an alarm email notification.
  * @param {string[]} toEmails - Array of recipient emails
  * @param {string} deviceName - Device ID / name
+ * @param {string|null} assetName - Asset name (e.g. Cold Room 1)
+ * @param {string|null} vehicleNumber - Vehicle number (e.g. WB-19-AB-1234)
  * @param {string} alarmType - e.g. "high_temp", "thermocouple_open"
  * @param {string} message - Alarm message
  * @param {number|null} temperature - Current temperature reading
  * @param {string} severity - Alarm severity
  */
-export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, temperature, severity = "critical") {
+export async function sendAlarmEmail(toEmails, deviceName, assetName, vehicleNumber, alarmType, message, temperature, severity = "critical") {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn("[Email] SMTP not configured, skipping email send");
     return false;
   }
 
-  const alarmLabel = alarmType.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  const alarmLabel = (alarmType || "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
   const severityColor = {
     critical: "#DC2626",
     high: "#EA580C",
@@ -53,7 +55,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     hour12: true,
   });
   const timestamp = `${dateStr} ${timeStr}`;
-  const subjectLine = `⚠ ${alarmLabel} — ${deviceName} — ${tempDisplay} [${timestamp}]`;
+  const subjectLine = `⚠ ${alarmLabel} — ${deviceName}${assetName ? ` (${assetName})` : ''} — ${tempDisplay} [${timestamp}]`;
 
   const html = `
 <!DOCTYPE html>
@@ -69,7 +71,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
         ${alarmLabel} Alert
       </h1>
       <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">
-        Asset Insights — Real-time Monitoring
+        Asset Insights — Real-time Telemetry Alert
       </p>
     </div>
 
@@ -77,9 +79,19 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     <div style="padding:28px 32px;">
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr>
-          <td style="padding:10px 0;color:#64748B;font-weight:600;width:130px;vertical-align:top;">Device</td>
+          <td style="padding:10px 0;color:#64748B;font-weight:600;width:130px;vertical-align:top;">Device ID</td>
           <td style="padding:10px 0;color:#0F172A;font-weight:700;font-family:monospace;font-size:15px;">${deviceName}</td>
         </tr>
+        ${assetName ? `
+        <tr style="border-top:1px solid #F1F5F9;">
+          <td style="padding:10px 0;color:#64748B;font-weight:600;vertical-align:top;">Asset</td>
+          <td style="padding:10px 0;color:#0F172A;font-weight:700;font-size:14px;">${assetName}</td>
+        </tr>` : ''}
+        ${vehicleNumber ? `
+        <tr style="border-top:1px solid #F1F5F9;">
+          <td style="padding:10px 0;color:#64748B;font-weight:600;vertical-align:top;">Vehicle Number</td>
+          <td style="padding:10px 0;color:#0F172A;font-weight:700;font-family:monospace;font-size:14px;">${vehicleNumber}</td>
+        </tr>` : ''}
         <tr style="border-top:1px solid #F1F5F9;">
           <td style="padding:10px 0;color:#64748B;font-weight:600;vertical-align:top;">Severity</td>
           <td style="padding:10px 0;">
@@ -97,7 +109,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
           <td style="padding:10px 0;color:#334155;">${message}</td>
         </tr>
         <tr style="border-top:1px solid #F1F5F9;">
-          <td style="padding:10px 0;color:#64748B;font-weight:600;vertical-align:top;">Time</td>
+          <td style="padding:10px 0;color:#64748B;font-weight:600;vertical-align:top;">Time (IST)</td>
           <td style="padding:10px 0;color:#334155;font-family:monospace;font-size:13px;">${timestamp}</td>
         </tr>
       </table>
@@ -106,7 +118,7 @@ export async function sendAlarmEmail(toEmails, deviceName, alarmType, message, t
     <!-- Footer -->
     <div style="background:#F8FAFC;padding:16px 32px;text-align:center;border-top:1px solid #E2E8F0;">
       <p style="margin:0;color:#94A3B8;font-size:11px;">
-        This is an automated alert from Asset Insights. Do not reply to this email.
+        This is an automated live telemetry alert from Asset Insights.
       </p>
     </div>
   </div>
@@ -135,6 +147,8 @@ export async function sendTestEmail(toEmails) {
   return sendAlarmEmail(
     toEmails,
     "TEST-DEVICE-001",
+    "Cold Storage Unit 1",
+    "WB-19-AB-1234",
     "high_temp",
     "This is a test alert from Asset Insights. If you received this, email notifications are working correctly.",
     25.5,

@@ -20,10 +20,17 @@ export const getDashboardSummary = async (request, reply) => {
     const assetsCount = await Asset.count({ where: { active: true } });
     const customersCount = await Customer.count({ where: { active: true } });
 
-    const statuses = await DeviceStatus.findAll();
+    const statuses = await DeviceStatus.findAll({
+      include: [{ model: Device, attributes: ["id", "device_id", "name"] }]
+    });
     const formattedStatuses = statuses.map((status) => {
       const raw = status.toJSON();
       raw.connection_state = getConnectionState(raw.last_seen_at);
+      raw.device_code = raw.Device?.device_id || raw.device_id;
+      raw.devices = {
+        device_id: raw.Device?.device_id || raw.device_id,
+        name: raw.Device?.name || "Device"
+      };
       return raw;
     });
 
@@ -118,17 +125,17 @@ export const createDevice = async (request, reply) => {
     await DeviceStatus.create({
       device_id: device.id,
       customer_id: device.customer_id,
-      temperature_c: 4.5,
-      latitude: request.body.latitude != null ? Number(request.body.latitude) : 28.5355,
-      longitude: request.body.longitude != null ? Number(request.body.longitude) : 77.2910,
+      temperature_c: null,
+      latitude: request.body.latitude != null ? Number(request.body.latitude) : null,
+      longitude: request.body.longitude != null ? Number(request.body.longitude) : null,
       speed_knots: 0,
-      gps_valid: true,
-      satellites: 10,
-      firmware_version: "2.0.5",
-      config_version: "1.0.0",
-      connection_state: "online",
-      last_seen_at: new Date(),
-      last_startup_at: new Date(),
+      gps_valid: false,
+      satellites: 0,
+      firmware_version: null,
+      config_version: null,
+      connection_state: "unknown",
+      last_seen_at: null,
+      last_startup_at: null,
     });
 
     reply.status(201).send(device);
@@ -193,15 +200,59 @@ export const updateDevice = async (request, reply) => {
 
 export const deleteDevice = async (request, reply) => {
   try {
-    const device = await Device.findByPk(request.params.id);
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.params.id);
+    let device;
+    if (isUUID) {
+      device = await Device.findByPk(request.params.id);
+    } else {
+      device = await Device.findOne({
+        where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(request.params.id).toLowerCase())
+      });
+    }
+
     if (!device) {
       reply.status(404).send({ error: "Device not found" });
       return;
     }
-    await DeviceStatus.destroy({ where: { device_id: device.id } });
-    await Alarm.destroy({ where: { device_id: device.id } });
+
+    const devUuid = device.id;
+    const devCode = device.device_id;
+
+    // 1. Delete associated PostgreSQL records
+    await DeviceStatus.destroy({ where: { device_id: devUuid } });
+    await Alarm.destroy({ where: { device_id: devUuid } });
+
+    // 2. Exception-guarded InfluxDB time-series telemetry deletion
+    try {
+      const influxUrl = process.env.INFLUX_URL || "http://localhost:8086";
+      const influxToken = process.env.INFLUX_TOKEN || "techavo-secret-admin-token-2026-xyz";
+      const influxOrg = process.env.INFLUX_ORG || "techavo";
+      const influxBucket = process.env.INFLUX_BUCKET || "telemetry";
+
+      const start = "1970-01-01T00:00:00Z";
+      const stop = new Date().toISOString();
+      const predicate = `device_id="${devCode}"`;
+
+      await fetch(`${influxUrl}/api/v2/delete?org=${encodeURIComponent(influxOrg)}&bucket=${encodeURIComponent(influxBucket)}`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Token ${influxToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          start,
+          stop,
+          predicate
+        })
+      });
+    } catch (influxErr) {
+      console.warn(`[InfluxDB] Ignored exception when deleting telemetry for device ${devCode}:`, influxErr.message);
+    }
+
+    // 3. Delete Device record
     await device.destroy();
-    reply.status(200).send({ message: "Device deleted successfully" });
+
+    reply.status(200).send({ message: "Device and telemetry data deleted successfully" });
   } catch (error) {
     console.error("Delete device error:", error);
     reply.status(400).send({ error: error.message || "Failed to delete device" });
@@ -306,16 +357,21 @@ export const getTelemetry = async (request, reply) => {
         device = await Device.findOne({ where: { device_id } });
       }
 
-      if (!device) {
-        reply.status(200).send([]);
-        return;
+      if (device) {
+        const lowerCode = String(device.device_id).toLowerCase();
+        deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device.device_id}" or r["device_id"] == "${device.id}" or r["device_id"] == "${device_id}" or r["device_id"] == "${lowerCode}")`;
+        deviceMap.set(device.device_id, device.id);
+        deviceMap.set(lowerCode, device.id);
+        deviceMap.set(device.id, device.id);
+      } else {
+        deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device_id}")`;
       }
-      deviceFilter = `|> filter(fn: (r) => r["device_id"] == "${device.device_id}")`;
-      deviceMap.set(device.device_id, device.id);
     } else {
       const allDevs = await Device.findAll();
       for (const d of allDevs) {
         deviceMap.set(d.device_id, d.id);
+        deviceMap.set(String(d.device_id).toLowerCase(), d.id);
+        deviceMap.set(d.id, d.id);
       }
     }
 
@@ -328,8 +384,9 @@ export const getTelemetry = async (request, reply) => {
         |> range(start: ${start.toISOString()}, stop: ${end.toISOString()})
         |> filter(fn: (r) => r["_measurement"] == "telemetry")
         ${deviceFilter}
-        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-        |> keep(columns: ["_time", "device_id", "temperature", "latitude", "longitude", "speed", "course", "valid"])
+        |> drop(columns: ["backup_record"])
+        |> pivot(rowKey:["_time", "device_id"], columnKey: ["_field"], valueColumn: "_value")
+        |> keep(columns: ["_time", "device_id", "temperature", "latitude", "longitude", "speed", "course", "valid", "backup_record", "backup_sequence", "csq", "roaming", "fault_code", "sending_time"])
         |> sort(columns: ["_time"], desc: false)
         |> limit(n: ${queryLimit})
     `;
@@ -341,20 +398,25 @@ export const getTelemetry = async (request, reply) => {
           next(row, tableMeta) {
             const o = tableMeta.toObject(row);
             const tempVal = o.temperature != null ? Number(o.temperature) : null;
-            // Ignore only 0°C readings (allowing all other temperatures including <= -200°C)
-            if (tempVal !== null && Math.abs(tempVal) > 0.0001) {
-              rows.push({
-                ts: o._time,
-                device_id: deviceMap.get(o.device_id) || o.device_id,
-                device_code: o.device_id,
-                temperature_c: tempVal,
-                latitude: o.latitude,
-                longitude: o.longitude,
-                speed_knots: o.speed,
-                course_deg: o.course,
-                valid: o.valid
-              });
-            }
+            rows.push({
+              ts: o._time,
+              data_time: o._time,
+              sending_time: o.sending_time || o._time,
+              received_at: o.sending_time || o._time,
+              device_id: deviceMap.get(o.device_id) || o.device_id,
+              device_code: o.device_id,
+              temperature_c: tempVal,
+              latitude: o.latitude != null ? Number(o.latitude) : null,
+              longitude: o.longitude != null ? Number(o.longitude) : null,
+              speed_knots: o.speed != null ? Number(o.speed) : 0.0,
+              course_deg: o.course != null ? Number(o.course) : 0.0,
+              valid: o.valid,
+              backup_record: o.backup_record === true || o.backup_record === "true",
+              backup_sequence: o.backup_sequence != null ? Number(o.backup_sequence) : null,
+              csq: o.csq != null ? Number(o.csq) : null,
+              roaming: o.roaming === true || o.roaming === "true",
+              fault_code: o.fault_code != null ? Number(o.fault_code) : 0,
+            });
           },
           error(err) {
             console.warn("InfluxDB query error:", err.message);

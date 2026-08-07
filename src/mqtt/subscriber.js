@@ -1,7 +1,8 @@
 import mqtt from "mqtt";
 import dotenv from "dotenv";
 import { Op } from "sequelize";
-import { Device, DeviceStatus, Alarm, NotificationRule } from "../models/index.js";
+import { sequelize } from "../config/database.js";
+import { Device, DeviceStatus, Alarm, NotificationRule, Asset } from "../models/index.js";
 import { Point } from "@influxdata/influxdb-client";
 import { writeApi } from "../config/influx.js";
 import { broadcastRealtimeEvent } from "../../server.js";
@@ -14,7 +15,10 @@ const TOPICS = [
   "/Himardri/data/+",
   "Himardri/data/+",
   "/Himardri/data/#",
-  "Himardri/data/#"
+  "Himardri/data/#",
+  "/Himadri/data/+",
+  "Himadri/data/+",
+  "/Himadri/data/#"
 ];
 
 // Map tracking consecutive 0°C readings per device
@@ -22,7 +26,7 @@ const deviceZeroCounts = new Map();
 
 function parseIndianTimestamp(payload) {
   // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25")
-  let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time;
+  let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time || payload.time;
   
   if (!dateVal && payload.date) {
     dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
@@ -104,45 +108,88 @@ export const initMqttSubscriber = () => {
 
   client.on("message", async (topic, message) => {
     try {
-      const payload = JSON.parse(message.toString());
+      let payload = {};
+      try {
+        payload = JSON.parse(message.toString());
+      } catch (parseErr) {
+        console.warn(`[MQTT] Non-JSON payload received on topic [${topic}]: ${message.toString()}`);
+        payload = { raw_message: message.toString() };
+      }
       console.log(`[MQTT] Received packet on topic [${topic}]:\n${JSON.stringify(payload, null, 2)}\n`);
 
       // Extract device code from topic path or payload
       const topicClean = topic.startsWith("/") ? topic.slice(1) : topic;
-      const parts = topicClean.split("/");
-      const topicDeviceCode = parts.length > 2 && parts[2] !== "data" ? parts[2] : (parts.length > 1 && parts[1] !== "data" ? parts[1] : null);
+      const parts = topicClean.split("/").filter(Boolean);
+      
+      // Find candidate device code from topic parts (filtering out common path words)
+      let topicDeviceCode = null;
+      const reservedWords = new Set(["himardri", "himadri", "data", "telemetry", "raw", "device", "devices", "status", "info", "gps"]);
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const part = parts[i].trim();
+        if (part && !reservedWords.has(part.toLowerCase())) {
+          topicDeviceCode = part;
+          break;
+        }
+      }
 
-      const deviceCode = payload.device_id || payload.deviceCode || payload.device_code || topicDeviceCode;
+      const rawDeviceId = 
+        payload.device_id || 
+        payload.deviceId || 
+        payload.deviceCode || 
+        payload.device_code || 
+        payload.dev_id || 
+        payload.devId || 
+        payload.id || 
+        payload.serial ||
+        payload.serial_number ||
+        topicDeviceCode;
+
+      const deviceCode = rawDeviceId ? String(rawDeviceId).trim() : null;
 
       if (!deviceCode && !payload.imei) {
         console.warn(`[MQTT] Telemetry ignored: No device identifier in topic (${topic}) or payload`);
         return;
       }
 
-      // Find device in DB by device_id or imei
+      // Find device in DB by device_id (case-insensitive) or imei
+      let device = null;
       const searchConditions = [];
-      if (deviceCode) searchConditions.push({ device_id: deviceCode });
-      if (payload.device_id && payload.device_id !== deviceCode) searchConditions.push({ device_id: payload.device_id });
-      if (payload.imei) searchConditions.push({ imei: String(payload.imei) });
+      if (deviceCode) {
+        searchConditions.push({ device_id: deviceCode });
+        searchConditions.push(sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), deviceCode.toLowerCase()));
+      }
+      if (payload.device_id && payload.device_id !== deviceCode) {
+        searchConditions.push({ device_id: payload.device_id });
+        searchConditions.push(sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(payload.device_id).toLowerCase()));
+      }
+      if (payload.imei) {
+        searchConditions.push({ imei: String(payload.imei) });
+      }
 
-      let device = await Device.findOne({
-        where: { [Op.or]: searchConditions }
+      device = await Device.findOne({
+        where: { [Op.or]: searchConditions },
+        include: [{ model: Asset, attributes: ["name", "vehicle_number"] }]
       });
 
       // Auto-register device if unknown
       if (!device && (deviceCode || payload.device_id)) {
-        const newDeviceId = deviceCode || payload.device_id;
-        console.log(`[MQTT] Auto-registering new device: ${newDeviceId}`);
+        const newDeviceId = String(deviceCode || payload.device_id).trim();
+        console.log(`[MQTT] Auto-registering unique device: ${newDeviceId}`);
         try {
           device = await Device.create({
             device_id: newDeviceId,
-            imei: payload.imei ? String(payload.imei) : null,
+            imei: payload.imei ? String(payload.imei).trim() : null,
             name: `Device ${newDeviceId}`,
             active: true,
-            alarm_enabled: true
+            alarm_enabled: true,
+            low_threshold: 2.0,
+            high_threshold: 8.0
           });
         } catch (dbErr) {
-          console.error(`[MQTT] Failed to auto-register device ${newDeviceId}:`, dbErr);
+          console.warn(`[MQTT] Device unique conflict for '${newDeviceId}', fetching existing record:`, dbErr.message);
+          device = await Device.findOne({
+            where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), newDeviceId.toLowerCase())
+          });
         }
       }
 
@@ -156,18 +203,42 @@ export const initMqttSubscriber = () => {
 
       // Parse GPS & Telemetry fields (support top-level properties and nested `gps` object)
       const gps = payload.gps || {};
-      const latitude = payload.latitude !== undefined ? payload.latitude : (gps.latitude !== undefined ? gps.latitude : null);
-      const longitude = payload.longitude !== undefined ? payload.longitude : (gps.longitude !== undefined ? gps.longitude : null);
-      const speed_knots = payload.speed_knots ?? payload.speed ?? gps.speed_knots ?? gps.speed ?? 0.0;
-      const course_deg = payload.course_deg ?? payload.course ?? gps.course_deg ?? gps.course ?? 0.0;
-      const satellites = payload.satellites ?? gps.satellites ?? null;
+      const latitude = payload.latitude ?? payload.lat ?? payload.Latitude ?? gps.latitude ?? gps.lat ?? null;
+      const longitude = payload.longitude ?? payload.lng ?? payload.lon ?? payload.Longitude ?? gps.longitude ?? gps.lng ?? gps.lon ?? null;
+      const speed_knots = payload.speed_knots ?? payload.speed ?? payload.speed_kmh ?? gps.speed_knots ?? gps.speed ?? 0.0;
+      const course_deg = payload.course_deg ?? payload.course ?? payload.heading ?? gps.course_deg ?? gps.course ?? gps.heading ?? 0.0;
+      const satellites = payload.satellites ?? payload.sats ?? gps.satellites ?? gps.sats ?? null;
       const isValid = payload.valid !== undefined ? Boolean(payload.valid) : (gps.valid !== undefined ? Boolean(gps.valid) : true);
-      const tempRaw = payload.temperature_c !== undefined ? Number(payload.temperature_c) : (payload.temp !== undefined ? Number(payload.temp) : null);
+
+      // Extract temperature supporting multiple key names (temperature_c, temperature, temp, temp_c, temp1, t1, val, deg_c, celsius)
+      const tempKeys = ['temperature_c', 'temperature', 'temp', 'temp_c', 'temp1', 't1', 'val', 'value', 'deg_c', 'celsius'];
+      let tempRaw = null;
+      for (const key of tempKeys) {
+        if (payload[key] !== undefined && payload[key] !== null) {
+          const num = Number(payload[key]);
+          if (!isNaN(num)) {
+            tempRaw = num;
+            break;
+          }
+        }
+      }
+      if (tempRaw === null && payload.gps) {
+        for (const key of tempKeys) {
+          if (payload.gps[key] !== undefined && payload.gps[key] !== null) {
+            const num = Number(payload.gps[key]);
+            if (!isNaN(num)) {
+              tempRaw = num;
+              break;
+            }
+          }
+        }
+      }
+
       const tempParsed = tempRaw !== null && !isNaN(tempRaw) ? Number(tempRaw.toFixed(2)) : null;
       const faultCode = payload.fault_code !== undefined ? Number(payload.fault_code) : 0;
 
-      // Filter out 0°C readings: 1-4 times ignored without DB store, 5+ times marked as OPEN sensor
-      const isZeroTemp = tempParsed === null || Math.abs(tempParsed) < 0.0001;
+      // Detect 0°C thermocouple disconnection
+      const isZeroTemp = tempParsed !== null && Math.abs(tempParsed) < 0.0001;
       const validTemp = isZeroTemp ? null : tempParsed;
 
       let currentZeroCount = 0;
@@ -175,7 +246,7 @@ export const initMqttSubscriber = () => {
         currentZeroCount = (deviceZeroCounts.get(device.id) || 0) + 1;
         deviceZeroCounts.set(device.id, currentZeroCount);
         console.warn(`[MQTT] Device ${device.device_id}: Received temperature 0°C (repeat count: ${currentZeroCount}).`);
-      } else if (!isZeroTemp) {
+      } else if (!isZeroTemp && tempRaw !== null) {
         deviceZeroCounts.set(device.id, 0);
         try {
           await Alarm.update(
@@ -189,28 +260,48 @@ export const initMqttSubscriber = () => {
 
       const isSensorOpen = currentZeroCount >= 5;
 
-      // 1. Insert Telemetry to InfluxDB (Only write when valid non-zero temperature is present)
-      if (validTemp !== null) {
-        try {
-          const point = new Point('telemetry')
-            .tag('device_id', device.device_id)
-            .floatField('temperature', Number(validTemp))
-            .floatField('latitude', latitude !== null ? Number(latitude) : 0.0)
-            .floatField('longitude', longitude !== null ? Number(longitude) : 0.0)
-            .floatField('speed', Number(speed_knots || 0.0))
-            .floatField('course', Number(course_deg || 0.0))
-            .booleanField('valid', isValid)
-            .timestamp(ts);
+      // Extract backup record & signal details
+      const isBackupRecord = payload.backup_record === true || String(payload.backup_record).toLowerCase() === "true";
+      const backupSequence = payload.backup_sequence !== undefined && payload.backup_sequence !== null ? Number(payload.backup_sequence) : null;
+      const csqVal = payload.csq !== undefined && payload.csq !== null ? Number(payload.csq) : null;
+      const isRoaming = payload.roaming === true || String(payload.roaming).toLowerCase() === "true";
+      const receivingTime = new Date();
 
-          writeApi.writePoint(point);
-          await writeApi.flush();
-        } catch (err) {
-          console.error("[InfluxDB] Failed to write telemetry point:", err);
+      // 1. Insert Telemetry to InfluxDB (with sample timestamp = data_time & field sending_time)
+      try {
+        const point = new Point('telemetry')
+          .tag('device_id', device.device_id)
+          .floatField('temperature', validTemp !== null ? Number(validTemp) : (tempParsed !== null ? Number(tempParsed) : 0.0))
+          .floatField('latitude', latitude !== null ? Number(latitude) : 0.0)
+          .floatField('longitude', longitude !== null ? Number(longitude) : 0.0)
+          .floatField('speed', Number(speed_knots || 0.0))
+          .floatField('course', Number(course_deg || 0.0))
+          .booleanField('valid', isValid)
+          .intField('fault_code', faultCode)
+          .booleanField('backup_record', isBackupRecord)
+          .stringField('sending_time', receivingTime.toISOString());
+
+        if (backupSequence !== null) {
+          point.intField('backup_sequence', backupSequence);
         }
+        if (csqVal !== null) {
+          point.intField('csq', csqVal);
+        }
+        if (payload.roaming !== undefined) {
+          point.booleanField('roaming', isRoaming);
+        }
+
+        // Set time-series point timestamp to sample timestamp (data_time)
+        point.timestamp(ts);
+
+        writeApi.writePoint(point);
+        await writeApi.flush();
+      } catch (err) {
+        console.error("[InfluxDB] Failed to write telemetry point:", err);
       }
 
       // 2. Upsert DeviceStatus
-      // If 5+ zeroes received: clear temperature_c (set to null) so status indicates OPEN
+      // For backup records: only update status if sample time is newer than existing last_seen_at
       const initialTempC = validTemp !== null ? validTemp : (isSensorOpen ? null : undefined);
 
       const [status, created] = await DeviceStatus.findOrCreate({
@@ -231,39 +322,76 @@ export const initMqttSubscriber = () => {
         }
       });
 
+      let shouldUpdateStatus = created;
       if (!created) {
-        const nextTempC = validTemp !== null ? validTemp : (isSensorOpen ? null : status.temperature_c);
-        await status.update({
-          temperature_c: nextTempC,
-          latitude: latitude !== null ? latitude : status.latitude,
-          longitude: longitude !== null ? longitude : status.longitude,
-          speed_knots: speed_knots,
-          course_deg: course_deg,
-          gps_valid: isValid,
-          satellites: satellites !== null ? satellites : status.satellites,
-          connection_state: "online",
-          last_seen_at: ts,
-        });
+        const existingLastSeen = status.last_seen_at ? new Date(status.last_seen_at).getTime() : 0;
+        const isNewer = ts.getTime() >= existingLastSeen;
+        // Live packet always updates status; backup packet only updates if timestamp is newer
+        if (!isBackupRecord || isNewer) {
+          shouldUpdateStatus = true;
+          const nextTempC = validTemp !== null ? validTemp : (isSensorOpen ? null : status.temperature_c);
+          await status.update({
+            temperature_c: nextTempC,
+            latitude: latitude !== null ? latitude : status.latitude,
+            longitude: longitude !== null ? longitude : status.longitude,
+            speed_knots: speed_knots,
+            course_deg: course_deg,
+            gps_valid: isValid,
+            satellites: satellites !== null ? satellites : status.satellites,
+            connection_state: "online",
+            last_seen_at: isNewer ? ts : status.last_seen_at,
+          });
+        }
       }
 
-      // Broadcast single-device update to connected live clients
+      // Broadcast single-device status and telemetry updates to connected live clients
       try {
         const fullStatus = status.toJSON ? status.toJSON() : status;
-        broadcastRealtimeEvent("device_status_update", {
+        const realtimeStatusPayload = {
           ...fullStatus,
-          device_id: device.device_id, // ensure string device_id format
+          id: device.id,
+          device_id: device.id, // Keep UUID matching for DB map state
+          device_code: device.device_id, // String device code (e.g. DEMO000002)
+          code: device.device_id,
           is_sensor_open: isSensorOpen,
+          backup_record: isBackupRecord,
+          csq: csqVal,
           devices: {
+            id: device.id,
             device_id: device.device_id,
             name: device.name,
           }
+        };
+
+        if (shouldUpdateStatus) {
+          broadcastRealtimeEvent("device_status_update", realtimeStatusPayload);
+        }
+
+        broadcastRealtimeEvent("telemetry_insert", {
+          ts: ts.toISOString(),
+          data_time: ts.toISOString(),
+          sending_time: receivingTime.toISOString(),
+          received_at: receivingTime.toISOString(),
+          device_id: device.id,
+          device_code: device.device_id,
+          temperature_c: validTemp !== null ? Number(validTemp) : (tempParsed !== null ? Number(tempParsed) : null),
+          latitude: latitude !== null ? Number(latitude) : null,
+          longitude: longitude !== null ? Number(longitude) : null,
+          speed_knots: Number(speed_knots || 0.0),
+          course_deg: Number(course_deg || 0.0),
+          valid: isValid,
+          backup_record: isBackupRecord,
+          backup_sequence: backupSequence,
+          csq: csqVal,
+          roaming: isRoaming,
+          fault_code: faultCode
         });
       } catch (bcErr) {
         console.error("[MQTT] Realtime broadcast error:", bcErr);
       }
 
-      // 3. Alarm Threshold Verification
-      if (device.alarm_enabled) {
+      // 3. Alarm Threshold Verification (ONLY for Live Data, NOT for offline backup records)
+      if (device.alarm_enabled && !isBackupRecord) {
         const alarmsToUpsert = [];
 
         if (faultCode > 0) {
@@ -373,10 +501,12 @@ export const initMqttSubscriber = () => {
               const emails = (rule.emails || "").split(/[,;\s]+/).map(e => e.trim()).filter(e => e && e.includes("@"));
               if (emails.length === 0) continue;
 
-              // Send email
+              // Send email with Asset name and Vehicle number
               const sent = await sendAlarmEmail(
                 emails,
                 device.device_id || device.name,
+                device.Asset?.name || null,
+                device.Asset?.vehicle_number || null,
                 matchedAlarm.type,
                 matchedAlarm.msg,
                 matchedAlarm.value,
