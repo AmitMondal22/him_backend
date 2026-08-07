@@ -34,11 +34,24 @@ export const getDashboardSummary = async (request, reply) => {
       return raw;
     });
 
-    const activeAlarms = await Alarm.findAll({ where: { active: true } });
+    const activeAlarms = await Alarm.findAll({
+      where: { active: true },
+      include: [{ model: Device, attributes: ["id", "device_id", "name"] }]
+    });
 
     const recentAlarms = [...activeAlarms]
       .sort((a, b) => new Date(b.last_occurred_at) - new Date(a.last_occurred_at))
-      .slice(0, 6);
+      .slice(0, 6)
+      .map((alarm) => {
+        const raw = alarm.toJSON();
+        raw.device_code = raw.Device?.device_id || raw.device_id;
+        raw.devices = {
+          id: raw.Device?.id || raw.device_id,
+          device_id: raw.Device?.device_id || raw.device_id,
+          name: raw.Device?.name || "Device"
+        };
+        return raw;
+      });
 
     const devicesInAlarm = new Set(activeAlarms.map((a) => a.device_id));
     const devicesInFault = new Set(
@@ -443,14 +456,45 @@ export const getAlarms = async (request, reply) => {
   try {
     const { device_id } = request.query;
     const where = {};
-    if (device_id) where.device_id = device_id;
+    if (device_id) {
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
+      if (isUUID) {
+        where.device_id = device_id;
+      } else {
+        const dev = await Device.findOne({
+          where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(device_id).toLowerCase())
+        });
+        if (dev) {
+          where.device_id = dev.id;
+        } else {
+          where.device_id = device_id;
+        }
+      }
+    }
 
     const alarms = await Alarm.findAll({
       where,
+      include: [
+        { model: Device, attributes: ["id", "device_id", "name"] },
+        { model: Customer, attributes: ["id", "name"] }
+      ],
       order: [["last_occurred_at", "DESC"]]
     });
-    reply.status(200).send(alarms);
+
+    const formattedAlarms = alarms.map((alarm) => {
+      const raw = alarm.toJSON();
+      raw.device_code = raw.Device?.device_id || raw.device_id;
+      raw.devices = {
+        id: raw.Device?.id || raw.device_id,
+        device_id: raw.Device?.device_id || raw.device_id,
+        name: raw.Device?.name || "Device"
+      };
+      return raw;
+    });
+
+    reply.status(200).send(formattedAlarms);
   } catch (error) {
+    console.error("Get alarms error:", error);
     reply.status(500).send({ error: "Failed to get alarms" });
   }
 };
