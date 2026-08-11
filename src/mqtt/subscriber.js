@@ -24,61 +24,66 @@ const TOPICS = [
 // Map tracking consecutive 0°C readings per device
 const deviceZeroCounts = new Map();
 function parseIndianTimestamp(payload) {
-  // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25Z")
-  let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time || payload.time;
-  
-  if (!dateVal && payload.date) {
-    dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
-  }
-
-  const isExplicitUtc = payload.is_utc === true || 
-                        payload.utc === true || 
-                        String(payload.tz || "").toUpperCase() === "UTC" || 
-                        String(payload.timezone || "").toUpperCase() === "UTC";
-
-  if (dateVal && typeof dateVal === "string") {
-    let str = dateVal.trim();
-
-    // Numeric string (epoch)
-    if (/^\d+$/.test(str)) {
-      const epochNum = Number(str);
+  // 1. If payload has numeric epoch, epoch is strictly UTC - use it!
+  const epochVal = payload.epoch ?? payload.ts_epoch;
+  if (epochVal !== undefined && epochVal !== null) {
+    const epochNum = Number(epochVal);
+    if (Number.isFinite(epochNum) && epochNum > 0) {
       let ms = epochNum;
       if (ms > 1e16) ms = Math.floor(ms / 1e6); // nanoseconds -> ms
       else if (ms > 1e13) ms = Math.floor(ms / 1e3); // microseconds -> ms
       else if (ms < 1e11) ms = ms * 1000; // seconds -> ms
       return new Date(ms);
     }
+  }
 
-    // ISO string explicitly containing 'Z', offset (+00:00, +05:30), or UTC/GMT suffix
+  // 2. Otherwise prioritize string timestamp fields (e.g. "2026-08-11T10:35:08")
+  let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time || payload.time;
+  
+  if (!dateVal && payload.date) {
+    dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
+  }
+
+  if (dateVal && typeof dateVal === "string") {
+    let str = dateVal.trim();
+
+    // Numeric epoch string (e.g. "1786444508")
+    if (/^\d+$/.test(str)) {
+      const epochNum = Number(str);
+      let ms = epochNum;
+      if (ms > 1e16) ms = Math.floor(ms / 1e6);
+      else if (ms > 1e13) ms = Math.floor(ms / 1e3);
+      else if (ms < 1e11) ms = ms * 1000;
+      return new Date(ms);
+    }
+
+    // ISO string explicitly containing timezone offset (+00:00, +05:30, Z, UTC, GMT)
     if (/[Z+-]\d{2}:?\d{2}$/i.test(str) || str.endsWith("Z") || /UTC|GMT$/i.test(str)) {
       const parsed = new Date(str.replace(/\s*(UTC|GMT)$/i, "Z"));
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
-    // ISO/SQL string without timezone offset e.g. "2026-07-25T12:33:25" or "2026-07-25 12:33:25"
+    // Device ISO strings without timezone (e.g. "2026-08-11T10:35:08" or "2026-08-11 10:35:08") are sent in UTC
     if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
-      const offset = isExplicitUtc ? "Z" : "+05:30";
-      const parsed = new Date(str.replace(' ', 'T') + offset);
+      const parsed = new Date(str.replace(' ', 'T') + 'Z');
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
     // Format: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss
     if (/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/);
-      const offset = isExplicitUtc ? "Z" : "+05:30";
-      const parsed = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}${offset}`);
+      const parsed = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}Z`);
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
     // Format: YYYY/MM/DD HH:mm:ss
     if (/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
-      const offset = isExplicitUtc ? "Z" : "+05:30";
-      const parsed = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}${offset}`);
+      const parsed = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}Z`);
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
-    const parsed = new Date(str);
+    const parsed = new Date(str.endsWith("Z") ? str : str + "Z");
     if (!isNaN(parsed.getTime())) return parsed;
   }
 
@@ -88,17 +93,6 @@ function parseIndianTimestamp(payload) {
     else if (ms > 1e13) ms = Math.floor(ms / 1e3);
     else if (ms < 1e11) ms = ms * 1000;
     return new Date(ms);
-  }
-
-  if (payload.epoch) {
-    const epochNum = Number(payload.epoch);
-    if (Number.isFinite(epochNum)) {
-      let ms = epochNum;
-      if (ms > 1e16) ms = Math.floor(ms / 1e6);
-      else if (ms > 1e13) ms = Math.floor(ms / 1e3);
-      else if (ms < 1e11) ms = ms * 1000;
-      return new Date(ms);
-    }
   }
 
   return new Date();
