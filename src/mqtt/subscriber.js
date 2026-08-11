@@ -23,47 +23,58 @@ const TOPICS = [
 
 // Map tracking consecutive 0°C readings per device
 const deviceZeroCounts = new Map();
-
 function parseIndianTimestamp(payload) {
-  // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25")
+  // Prioritize string timestamp fields (e.g. "2026-07-25T12:33:25Z")
   let dateVal = payload.timestamp || payload.ts || payload.datetime || payload.created_at || payload.time_stamp || payload.device_time || payload.time;
   
   if (!dateVal && payload.date) {
     dateVal = payload.time ? `${payload.date} ${payload.time}` : payload.date;
   }
 
+  const isExplicitUtc = payload.is_utc === true || 
+                        payload.utc === true || 
+                        String(payload.tz || "").toUpperCase() === "UTC" || 
+                        String(payload.timezone || "").toUpperCase() === "UTC";
+
   if (dateVal && typeof dateVal === "string") {
     let str = dateVal.trim();
 
+    // Numeric string (epoch)
     if (/^\d+$/.test(str)) {
       const epochNum = Number(str);
-      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
+      let ms = epochNum;
+      if (ms > 1e16) ms = Math.floor(ms / 1e6); // nanoseconds -> ms
+      else if (ms > 1e13) ms = Math.floor(ms / 1e3); // microseconds -> ms
+      else if (ms < 1e11) ms = ms * 1000; // seconds -> ms
+      return new Date(ms);
     }
 
-    // ISO string with timezone offset or 'Z' (e.g. "2026-07-25T12:33:25+05:30" or "2026-07-25T07:03:25Z")
-    if (/[Z+-]\d{2}:?\d{2}$/.test(str) || str.endsWith("Z")) {
-      const parsed = new Date(str);
+    // ISO string explicitly containing 'Z', offset (+00:00, +05:30), or UTC/GMT suffix
+    if (/[Z+-]\d{2}:?\d{2}$/i.test(str) || str.endsWith("Z") || /UTC|GMT$/i.test(str)) {
+      const parsed = new Date(str.replace(/\s*(UTC|GMT)$/i, "Z"));
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
     // ISO/SQL string without timezone offset e.g. "2026-07-25T12:33:25" or "2026-07-25 12:33:25"
-    // The device sends local Indian Time (IST, +05:30)
     if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
-      const parsed = new Date(str.replace(' ', 'T') + '+05:30');
+      const offset = isExplicitUtc ? "Z" : "+05:30";
+      const parsed = new Date(str.replace(' ', 'T') + offset);
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
     // Format: DD/MM/YYYY HH:mm:ss or DD-MM-YYYY HH:mm:ss
     if (/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})[ T](\d{2}:\d{2}:\d{2})$/);
-      const parsed = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}+05:30`);
+      const offset = isExplicitUtc ? "Z" : "+05:30";
+      const parsed = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}${offset}`);
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
     // Format: YYYY/MM/DD HH:mm:ss
     if (/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/.test(str)) {
       const m = str.match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
-      const parsed = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}+05:30`);
+      const offset = isExplicitUtc ? "Z" : "+05:30";
+      const parsed = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}${offset}`);
       if (!isNaN(parsed.getTime())) return parsed;
     }
 
@@ -72,13 +83,21 @@ function parseIndianTimestamp(payload) {
   }
 
   if (typeof dateVal === "number" && Number.isFinite(dateVal)) {
-    return new Date(dateVal > 1e11 ? dateVal : dateVal * 1000);
+    let ms = dateVal;
+    if (ms > 1e16) ms = Math.floor(ms / 1e6);
+    else if (ms > 1e13) ms = Math.floor(ms / 1e3);
+    else if (ms < 1e11) ms = ms * 1000;
+    return new Date(ms);
   }
 
   if (payload.epoch) {
     const epochNum = Number(payload.epoch);
     if (Number.isFinite(epochNum)) {
-      return new Date(epochNum > 1e11 ? epochNum : epochNum * 1000);
+      let ms = epochNum;
+      if (ms > 1e16) ms = Math.floor(ms / 1e6);
+      else if (ms > 1e13) ms = Math.floor(ms / 1e3);
+      else if (ms < 1e11) ms = ms * 1000;
+      return new Date(ms);
     }
   }
 
