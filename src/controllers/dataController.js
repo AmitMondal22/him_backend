@@ -422,8 +422,8 @@ export const getTelemetry = async (request, reply) => {
       }
     }
 
-    const end = end_date ? new Date(end_date) : new Date();
-    let start = start_date ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
+    const end = end_date && !isNaN(new Date(end_date).getTime()) ? new Date(end_date) : new Date();
+    let start = start_date && !isNaN(new Date(start_date).getTime()) ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
 
     // Bound telemetry query start time to target device creation timestamp to avoid showing old report data from deleted instances
     if (targetDevice && targetDevice.createdAt) {
