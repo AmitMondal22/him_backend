@@ -1,7 +1,7 @@
 import { signup, signin, getCurrentUser, changePassword } from "../controllers/authController.js";
 import { 
   getDashboardSummary, getDevices, getDeviceById, createDevice, updateDevice, deleteDevice,
-  getDeviceStatuses, getDeviceStatus, getTelemetry, getAlarms, updateAlarm,
+  getDeviceStatuses, getDeviceStatus, getTelemetry, updateTelemetry, deleteTelemetry, getAlarms, updateAlarm,
   getSites, createSite, updateSite, deleteSite,
   getAssets, createAsset, updateAsset, deleteAsset,
   getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getUserRoles, seedDemo,
@@ -51,6 +51,9 @@ export default async function apiRoutes(fastify, options) {
 
     // Telemetry
     protectedFastify.get("/telemetry", getTelemetry);
+    protectedFastify.put("/telemetry", updateTelemetry);
+    protectedFastify.post("/telemetry", updateTelemetry);
+    protectedFastify.delete("/telemetry", deleteTelemetry);
 
     // Alarms
     protectedFastify.get("/alarms", getAlarms);

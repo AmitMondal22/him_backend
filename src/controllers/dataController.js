@@ -3,7 +3,8 @@ import {
 } from "../models/index.js";
 import { Op } from "sequelize";
 import { sequelize } from "../config/database.js";
-import { queryApi, bucket } from "../config/influx.js";
+import { Point } from "@influxdata/influxdb-client";
+import { queryApi, writeApi, bucket, org } from "../config/influx.js";
 import { broadcastRealtimeEvent } from "../../server.js";
 
 const getConnectionState = (lastSeenAt) => {
@@ -491,6 +492,232 @@ export const getTelemetry = async (request, reply) => {
   } catch (error) {
     console.error("Get telemetry error:", error);
     reply.status(500).send({ error: "Failed to get telemetry" });
+  }
+};
+
+async function deleteSingleInfluxPoint(deviceCode, deviceUuid, targetTimestamp) {
+  const candidateUrls = [
+    process.env.INFLUX_URL,
+    "http://influxdb:8086",
+    "http://localhost:8086",
+    "http://127.0.0.1:8086"
+  ].filter(Boolean);
+
+  const uniqueUrls = [...new Set(candidateUrls)];
+  const influxToken = process.env.INFLUX_TOKEN || "techavo-secret-admin-token-2026-xyz";
+  const influxOrg = process.env.INFLUX_ORG || "techavo";
+  const influxBucket = process.env.INFLUX_BUCKET || "telemetry";
+
+  const targetDate = new Date(targetTimestamp);
+  if (isNaN(targetDate.getTime())) return;
+
+  const start = new Date(targetDate.getTime() - 1000).toISOString();
+  const stop = new Date(targetDate.getTime() + 1000).toISOString();
+
+  const predicates = [
+    `device_id="${deviceCode}"`,
+    `_measurement="telemetry" AND device_id="${deviceCode}"`
+  ];
+  if (deviceUuid && deviceUuid !== deviceCode) {
+    predicates.push(`device_id="${deviceUuid}"`);
+    predicates.push(`_measurement="telemetry" AND device_id="${deviceUuid}"`);
+  }
+
+  for (const baseUrl of uniqueUrls) {
+    for (const pred of predicates) {
+      try {
+        const deleteUrl = `${baseUrl.replace(/\/$/, "")}/api/v2/delete?org=${encodeURIComponent(influxOrg)}&bucket=${encodeURIComponent(influxBucket)}`;
+        await fetch(deleteUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Token ${influxToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            start,
+            stop,
+            predicate: pred
+          })
+        });
+      } catch (err) {
+        // silent
+      }
+    }
+  }
+}
+
+// UPDATE or insert single telemetry point
+export const updateTelemetry = async (request, reply) => {
+  try {
+    const {
+      device_id,
+      ts,
+      old_ts,
+      temperature_c,
+      latitude,
+      longitude,
+      speed_knots,
+      course_deg,
+      valid,
+      backup_record,
+      backup_sequence,
+      csq,
+      fault_code,
+      sending_time,
+    } = request.body;
+
+    if (!device_id || !ts) {
+      reply.status(400).send({ error: "device_id and ts (timestamp) are required" });
+      return;
+    }
+
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
+    let device = null;
+    if (isUUID) {
+      device = await Device.findByPk(device_id);
+    } else {
+      device = await Device.findOne({
+        where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(device_id).toLowerCase())
+      });
+    }
+
+    if (!device) {
+      reply.status(404).send({ error: "Device not found" });
+      return;
+    }
+
+    const deviceCode = device.device_id;
+    const targetDate = new Date(ts);
+    if (isNaN(targetDate.getTime())) {
+      reply.status(400).send({ error: "Invalid timestamp (ts)" });
+      return;
+    }
+
+    // If timestamp was changed, remove point at previous timestamp
+    if (old_ts && old_ts !== ts) {
+      await deleteSingleInfluxPoint(deviceCode, device.id, old_ts);
+    }
+
+    const isBackup = backup_record === true || String(backup_record).toLowerCase() === "true";
+    const isValidGps = valid !== undefined ? Boolean(valid) : true;
+    const parsedTemp = temperature_c != null && !isNaN(Number(temperature_c)) ? Number(Number(temperature_c).toFixed(2)) : 0.0;
+    const parsedLat = latitude != null && !isNaN(Number(latitude)) ? Number(Number(latitude).toFixed(6)) : 0.0;
+    const parsedLng = longitude != null && !isNaN(Number(longitude)) ? Number(Number(longitude).toFixed(6)) : 0.0;
+    const parsedSpeed = speed_knots != null && !isNaN(Number(speed_knots)) ? Number(Number(speed_knots).toFixed(2)) : 0.0;
+    const parsedCourse = course_deg != null && !isNaN(Number(course_deg)) ? Number(Number(course_deg).toFixed(2)) : 0.0;
+    const parsedFault = fault_code != null && !isNaN(Number(fault_code)) ? Number(fault_code) : 0;
+
+    // Write Point to InfluxDB
+    const point = new Point('telemetry')
+      .tag('device_id', deviceCode)
+      .floatField('temperature', parsedTemp)
+      .floatField('latitude', parsedLat)
+      .floatField('longitude', parsedLng)
+      .floatField('speed', parsedSpeed)
+      .floatField('course', parsedCourse)
+      .booleanField('valid', isValidGps)
+      .intField('fault_code', parsedFault)
+      .booleanField('backup_record', isBackup)
+      .stringField('sending_time', sending_time || new Date().toISOString());
+
+    if (backup_sequence !== undefined && backup_sequence !== null && !isNaN(Number(backup_sequence))) {
+      point.intField('backup_sequence', Number(backup_sequence));
+    }
+    if (csq !== undefined && csq !== null && !isNaN(Number(csq))) {
+      point.intField('csq', Number(csq));
+    }
+
+    point.timestamp(targetDate);
+    writeApi.writePoint(point);
+    await writeApi.flush();
+
+    // Optionally update DeviceStatus if this is the newest point
+    const status = await DeviceStatus.findOne({ where: { device_id: device.id } });
+    if (status) {
+      const lastSeen = status.last_seen_at ? new Date(status.last_seen_at).getTime() : 0;
+      if (targetDate.getTime() >= lastSeen) {
+        await status.update({
+          temperature_c: parsedTemp,
+          latitude: parsedLat,
+          longitude: parsedLng,
+          speed_knots: parsedSpeed,
+          course_deg: parsedCourse,
+          gps_valid: isValidGps,
+          last_seen_at: targetDate,
+        });
+
+        broadcastRealtimeEvent("device_status_update", {
+          ...status.toJSON(),
+          id: device.id,
+          device_id: device.id,
+          device_code: device.device_id,
+          devices: {
+            id: device.id,
+            device_id: device.device_id,
+            name: device.name,
+          }
+        });
+      }
+    }
+
+    const updatedRecord = {
+      ts: targetDate.toISOString(),
+      data_time: targetDate.toISOString(),
+      sending_time: sending_time || new Date().toISOString(),
+      received_at: sending_time || new Date().toISOString(),
+      device_id: device.id,
+      device_code: device.device_id,
+      temperature_c: parsedTemp,
+      latitude: parsedLat,
+      longitude: parsedLng,
+      speed_knots: parsedSpeed,
+      course_deg: parsedCourse,
+      valid: isValidGps,
+      backup_record: isBackup,
+      backup_sequence: backup_sequence != null ? Number(backup_sequence) : null,
+      csq: csq != null ? Number(csq) : null,
+      fault_code: parsedFault,
+    };
+
+    reply.status(200).send({
+      message: "Telemetry record updated successfully",
+      record: updatedRecord
+    });
+  } catch (error) {
+    console.error("Update telemetry error:", error);
+    reply.status(500).send({ error: error.message || "Failed to update telemetry record" });
+  }
+};
+
+// DELETE single telemetry point
+export const deleteTelemetry = async (request, reply) => {
+  try {
+    const { device_id, ts } = request.body || request.query;
+    if (!device_id || !ts) {
+      reply.status(400).send({ error: "device_id and ts are required" });
+      return;
+    }
+
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(device_id);
+    let device = null;
+    if (isUUID) {
+      device = await Device.findByPk(device_id);
+    } else {
+      device = await Device.findOne({
+        where: sequelize.where(sequelize.fn('LOWER', sequelize.col('device_id')), String(device_id).toLowerCase())
+      });
+    }
+
+    if (!device) {
+      reply.status(404).send({ error: "Device not found" });
+      return;
+    }
+
+    await deleteSingleInfluxPoint(device.device_id, device.id, ts);
+    reply.status(200).send({ message: "Telemetry point deleted successfully" });
+  } catch (error) {
+    console.error("Delete telemetry error:", error);
+    reply.status(500).send({ error: error.message || "Failed to delete telemetry record" });
   }
 };
 
