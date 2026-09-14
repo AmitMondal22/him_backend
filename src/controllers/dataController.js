@@ -508,7 +508,14 @@ async function deleteSingleInfluxPoint(deviceCode, deviceUuid, targetTimestamp) 
   const influxOrg = process.env.INFLUX_ORG || "techavo";
   const influxBucket = process.env.INFLUX_BUCKET || "telemetry";
 
-  const targetDate = new Date(targetTimestamp);
+  let targetDate = new Date(targetTimestamp);
+  if (isNaN(targetDate.getTime()) && /^\d+$/.test(String(targetTimestamp).trim())) {
+    const num = Number(targetTimestamp);
+    targetDate = new Date(num > 1e11 ? num : num * 1000);
+  } else if (isNaN(targetDate.getTime()) && typeof targetTimestamp === "string") {
+    const cleanTs = targetTimestamp.trim().replace(" ", "T");
+    targetDate = new Date(cleanTs.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(cleanTs) ? cleanTs : cleanTs + "+05:30");
+  }
   if (isNaN(targetDate.getTime())) return;
 
   const start = new Date(targetDate.getTime() - 1000).toISOString();
@@ -587,7 +594,14 @@ export const updateTelemetry = async (request, reply) => {
     }
 
     const deviceCode = device.device_id;
-    const targetDate = new Date(ts);
+    let targetDate = new Date(ts);
+    if (isNaN(targetDate.getTime()) && /^\d+$/.test(String(ts).trim())) {
+      const num = Number(ts);
+      targetDate = new Date(num > 1e11 ? num : num * 1000);
+    } else if (isNaN(targetDate.getTime()) && typeof ts === "string") {
+      const cleanTs = ts.trim().replace(" ", "T");
+      targetDate = new Date(cleanTs.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(cleanTs) ? cleanTs : cleanTs + "+05:30");
+    }
     if (isNaN(targetDate.getTime())) {
       reply.status(400).send({ error: "Invalid timestamp (ts)" });
       return;
