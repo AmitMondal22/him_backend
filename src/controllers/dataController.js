@@ -426,15 +426,18 @@ export const getTelemetry = async (request, reply) => {
     const end = end_date && !isNaN(new Date(end_date).getTime()) ? new Date(end_date) : new Date();
     let start = start_date && !isNaN(new Date(start_date).getTime()) ? new Date(start_date) : new Date(end.getTime() - 24 * 3600 * 1000);
 
-    // Bound telemetry query start time to target device creation timestamp to avoid showing old report data from deleted instances
-    if (targetDevice && targetDevice.createdAt) {
+    // Only apply device creation boundary if user did NOT provide an explicit start_date
+    if (!start_date && targetDevice && targetDevice.createdAt) {
       const createdTime = new Date(targetDevice.createdAt);
-      if (!isNaN(createdTime.getTime()) && createdTime > start) {
+      if (!isNaN(createdTime.getTime()) && createdTime < end && createdTime > start) {
         start = createdTime;
       }
     }
 
-    const queryLimit = (start_date || end_date) ? 5000 : parseInt(limit);
+    const requestedLimit = parseInt(limit, 10);
+    const queryLimit = (!isNaN(requestedLimit) && requestedLimit > 0)
+      ? requestedLimit
+      : ((start_date || end_date) ? 100000 : 1000);
 
     const query = `
       from(bucket: "${bucket}")
